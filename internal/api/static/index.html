@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Janus Security Testing Platform</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">Janus Security Testing Platform</h1>
+            <p class="text-gray-600 mt-2">Generate and encrypt test data for security software validation</p>
+        </div>
+
+        <!-- Navigation -->
+        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
+            <div class="flex space-x-4">
+                <button onclick="showTab('scenarios')" id="tab-scenarios" class="px-4 py-2 rounded bg-blue-500 text-white">Scenarios</button>
+                <button onclick="showTab('jobs')" id="tab-jobs" class="px-4 py-2 rounded bg-gray-200 text-gray-700">Jobs</button>
+                <button onclick="showTab('activity')" id="tab-activity" class="px-4 py-2 rounded bg-gray-200 text-gray-700">Activity</button>
+            </div>
+        </div>
+
+        <!-- Scenarios Tab -->
+        <div id="content-scenarios" class="tab-content">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                <!-- Create Scenario -->
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <h2 class="text-xl font-bold mb-4">Create Scenario</h2>
+                    <form id="create-scenario-form" onsubmit="createScenario(event)">
+                        <div class="mb-4">
+                            <label class="block text-gray-700 mb-2">Name</label>
+                            <input type="text" id="scenario-name" class="w-full px-3 py-2 border rounded" required>
+                        </div>
+                        <div class="mb-4">
+                            <label class="block text-gray-700 mb-2">Template</label>
+                            <select id="scenario-template" class="w-full px-3 py-2 border rounded" required>
+                                <option value="">Select a template...</option>
+                                <option value="healthcare-basic">Healthcare Basic (100 files)</option>
+                                <option value="healthcare-large">Healthcare Large (10,000 files)</option>
+                                <option value="financial-tax">Financial Tax (500 files)</option>
+                                <option value="pii-only">PII Only (1,000 files)</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="w-full bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
+                            Create Scenario
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Statistics -->
+                <div class="bg-white rounded-lg shadow-md p-6">
+                    <h2 class="text-xl font-bold mb-4">Statistics</h2>
+                    <div id="stats-content">
+                        <p class="text-gray-600">Select a scenario to view statistics</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scenarios List -->
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold">Scenarios</h2>
+                    <button onclick="loadScenarios()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Refresh</button>
+                </div>
+                <div id="scenarios-list">
+                    <p class="text-gray-600">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Jobs Tab -->
+        <div id="content-jobs" class="tab-content hidden">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold">Encryption Jobs</h2>
+                    <button onclick="loadJobs()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Refresh</button>
+                </div>
+                <div id="jobs-list">
+                    <p class="text-gray-600">Loading...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Activity Tab -->
+        <div id="content-activity" class="tab-content hidden">
+            <div class="bg-white rounded-lg shadow-md p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold">Live Activity Log</h2>
+                    <div>
+                        <span id="ws-status" class="text-gray-600 mr-4">Disconnected</span>
+                        <button onclick="toggleAutoScroll()" id="autoscroll-btn" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Auto-scroll: ON</button>
+                    </div>
+                </div>
+                <div id="activity-log" class="bg-gray-50 rounded p-4 h-96 overflow-y-auto font-mono text-sm">
+                    <p class="text-gray-600">Connecting to activity stream...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

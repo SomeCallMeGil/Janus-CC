@@ -1,0 +1,79 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+janus-cli
+janus-server
+janus-web
+
+# Test files
+test.db
+test_*.go
+test-payload/
+test-*/
+
+# Generated files
+*.db
+*.log
+payloads/
+output/
+generated/
+
+# Go
+*.test
+*.out
+vendor/
+go.work
+go.work.sum
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Build artifacts
+bin/
+dist/
+build/
+
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+
+# Documentation builds
+docs/_build/
+site/
+
+# Coverage
+*.cover
+coverage.txt
+coverage.html
+
+# Backup files
+*.bak
+*.backup
+*~.nib
+
+# Setup files (keep originals in setup/)
+!setup/
