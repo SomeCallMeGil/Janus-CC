@@ -3,9 +3,6 @@
 *.dll
 *.so
 *.dylib
-janus-cli
-janus-server
-janus-web
 
 # Test files
 test.db
