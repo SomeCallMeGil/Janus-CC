@@ -11,28 +11,28 @@ import (
 // QuickGenerateOptions provides a simplified interface
 type QuickGenerateOptions struct {
 	// Output
-	Name       string
-	OutputPath string
-	
+	Name       string `json:"name"`
+	OutputPath string `json:"output_path"`
+
 	// Primary constraint (pick ONE)
-	TotalSize  string  // e.g., "5GB", "100MB" (if set, this mode is used)
-	FileCount  int     // e.g., 10000 (if TotalSize not set, this mode is used)
-	
+	TotalSize string `json:"total_size"` // e.g., "5GB", "100MB" (if set, this mode is used)
+	FileCount int    `json:"file_count"` // e.g., 10000 (if TotalSize not set, this mode is used)
+
 	// File size range
-	FileSizeMin string  // e.g., "1KB"
-	FileSizeMax string  // e.g., "10MB"
-	
+	FileSizeMin string `json:"file_size_min"` // e.g., "1KB"
+	FileSizeMax string `json:"file_size_max"` // e.g., "10MB"
+
 	// Content distribution (must total 100)
-	PIIPercent    float64 // 0-100
-	PIIType       string  // "standard", "healthcare", "financial"
-	FillerPercent float64 // 0-100
-	
+	PIIPercent    float64 `json:"pii_percent"`    // 0-100
+	PIIType       string  `json:"pii_type"`       // "standard", "healthcare", "financial"
+	FillerPercent float64 `json:"filler_percent"` // 0-100
+
 	// Format
-	Formats []string // ["csv", "json", "txt"]
-	
+	Formats []string `json:"formats"` // ["csv", "json", "txt"]
+
 	// Optional
-	DirectoryDepth int   // default: 3
-	Seed           int64 // for reproducible generation (0 = random)
+	DirectoryDepth int   `json:"directory_depth"` // default: 3
+	Seed           int64 `json:"seed"`            // for reproducible generation (0 = random)
 }
 
 // ToEnhancedOptions converts QuickGenerateOptions to EnhancedGenerateOptions

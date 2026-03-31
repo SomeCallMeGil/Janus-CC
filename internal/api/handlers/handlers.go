@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -325,14 +326,56 @@ func (h *Handlers) EncryptFiles(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// DestroyScenario destroys a scenario's payload
+// DestroyScenario deletes all generated payload files for a scenario from disk
 func (h *Handlers) DestroyScenario(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	// TODO: Implement destruction logic
-	respondJSON(w, http.StatusOK, map[string]string{
+	files, err := h.db.ListFilesByScenario(id, models.FileFilters{})
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	go func() {
+		h.hub.Broadcast(map[string]interface{}{
+			"type":        "destroy_started",
+			"scenario_id": id,
+			"total":       len(files),
+			"time":        time.Now().UTC(),
+		})
+
+		deleted := 0
+		failed := 0
+		for _, f := range files {
+			if err := os.Remove(f.Path); err != nil && !os.IsNotExist(err) {
+				failed++
+				continue
+			}
+			deleted++
+		}
+
+		// Mark scenario status as destroyed
+		scenario, err := h.scenarioManager.Get(id)
+		if err == nil {
+			h.scenarioManager.Update(id, map[string]interface{}{
+				"status": "destroyed",
+			})
+			_ = scenario
+		}
+
+		h.hub.Broadcast(map[string]interface{}{
+			"type":        "destroy_completed",
+			"scenario_id": id,
+			"deleted":     deleted,
+			"failed":      failed,
+			"time":        time.Now().UTC(),
+		})
+	}()
+
+	respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"scenario_id": id,
-		"message":     "Destruction not yet implemented",
+		"message":     "Destroy started",
+		"total_files": len(files),
 	})
 }
 

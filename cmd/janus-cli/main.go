@@ -8,11 +8,13 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
-	
+
 	// ===== ADDED: Enhanced generation imports =====
 	"janus/internal/core/generator/enhanced"
 	"janus/internal/core/generator/models"
@@ -140,8 +142,9 @@ func main() {
 		Long:  "Generate files with enhanced features: size/count modes, PII/filler distribution, disk space validation",
 		RunE:  generateQuick,
 	}
-	
+
 	generateQuickCmd.Flags().String("name", "CLI Generated", "Scenario name")
+	generateQuickCmd.Flags().String("preset", "", "Use a prebuilt scenario (see: janus-cli gen presets)")
 	generateQuickCmd.Flags().String("total-size", "", "Total size (e.g., 5GB, 100MB) - uses size mode")
 	generateQuickCmd.Flags().Int("file-count", 0, "Number of files - uses count mode")
 	generateQuickCmd.Flags().String("file-size-min", "1KB", "Minimum file size")
@@ -151,12 +154,20 @@ func main() {
 	generateQuickCmd.Flags().Float64("filler-percent", 90, "Filler percentage (0-100, must total 100 with pii-percent)")
 	generateQuickCmd.Flags().String("output", "./payloads/quick", "Output directory")
 	generateQuickCmd.Flags().Int("seed", 0, "Random seed for reproducible generation (0=random)")
-	
+	generateQuickCmd.Flags().Bool("watch", false, "Stream progress via WebSocket until complete")
+
+	presetsCmd := &cobra.Command{
+		Use:   "presets",
+		Short: "List available prebuilt scenarios",
+		RunE:  listPresets,
+	}
+
 	genCmd := &cobra.Command{
 		Use:   "gen",
 		Short: "Enhanced file generation",
 	}
 	genCmd.AddCommand(generateQuickCmd)
+	genCmd.AddCommand(presetsCmd)
 	// ============================================
 
 	// Add all commands
@@ -499,67 +510,102 @@ func exportManifest(cmd *cobra.Command, args []string) error {
 }
 
 // ===== ADDED: Enhanced generation handler =====
-func generateQuick(cmd *cobra.Command, args []string) error {
-	// Get flags
-	name, _ := cmd.Flags().GetString("name")
-	totalSize, _ := cmd.Flags().GetString("total-size")
-	fileCount, _ := cmd.Flags().GetInt("file-count")
-	fileSizeMin, _ := cmd.Flags().GetString("file-size-min")
-	fileSizeMax, _ := cmd.Flags().GetString("file-size-max")
-	piiPercent, _ := cmd.Flags().GetFloat64("pii-percent")
-	piiType, _ := cmd.Flags().GetString("pii-type")
-	fillerPercent, _ := cmd.Flags().GetFloat64("filler-percent")
-	output, _ := cmd.Flags().GetString("output")
-	seed, _ := cmd.Flags().GetInt("seed")
-	
-	// Build options
-	opts := enhanced.QuickGenerateOptions{
-		Name:          name,
-		OutputPath:    output,
-		TotalSize:     totalSize,
-		FileCount:     fileCount,
-		FileSizeMin:   fileSizeMin,
-		FileSizeMax:   fileSizeMax,
-		PIIPercent:    piiPercent,
-		PIIType:       piiType,
-		FillerPercent: fillerPercent,
-		Formats:       []string{"csv", "json", "txt"},
-		DirectoryDepth: 3,
-		Seed:          int64(seed),
+
+func listPresets(cmd *cobra.Command, args []string) error {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "PRESET\tMODE\tSIZE/COUNT\tPII%\tTYPE")
+	for _, name := range enhanced.ListPrebuiltScenarios() {
+		p, _ := enhanced.GetPrebuiltScenario(name)
+		mode := "count"
+		constraint := fmt.Sprintf("%d files", p.FileCount)
+		if p.TotalSize != "" {
+			mode = "size"
+			constraint = p.TotalSize
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%.0f%%\t%s\n",
+			name, mode, constraint, p.PIIPercent, p.PIIType)
 	}
-	
-	// Convert to enhanced options (validates input format)
+	w.Flush()
+	return nil
+}
+
+func generateQuick(cmd *cobra.Command, args []string) error {
+	preset, _ := cmd.Flags().GetString("preset")
+
+	var opts enhanced.QuickGenerateOptions
+
+	if preset != "" {
+		p, ok := enhanced.GetPrebuiltScenario(preset)
+		if !ok {
+			return fmt.Errorf("unknown preset %q — run 'janus-cli gen presets' to list available", preset)
+		}
+		opts = p
+		// Allow flag overrides on top of preset
+		if cmd.Flags().Changed("name") {
+			opts.Name, _ = cmd.Flags().GetString("name")
+		}
+		if cmd.Flags().Changed("output") {
+			opts.OutputPath, _ = cmd.Flags().GetString("output")
+		}
+		if cmd.Flags().Changed("seed") {
+			seed, _ := cmd.Flags().GetInt("seed")
+			opts.Seed = int64(seed)
+		}
+	} else {
+		name, _ := cmd.Flags().GetString("name")
+		totalSize, _ := cmd.Flags().GetString("total-size")
+		fileCount, _ := cmd.Flags().GetInt("file-count")
+		fileSizeMin, _ := cmd.Flags().GetString("file-size-min")
+		fileSizeMax, _ := cmd.Flags().GetString("file-size-max")
+		piiPercent, _ := cmd.Flags().GetFloat64("pii-percent")
+		piiType, _ := cmd.Flags().GetString("pii-type")
+		fillerPercent, _ := cmd.Flags().GetFloat64("filler-percent")
+		output, _ := cmd.Flags().GetString("output")
+		seed, _ := cmd.Flags().GetInt("seed")
+
+		opts = enhanced.QuickGenerateOptions{
+			Name:           name,
+			OutputPath:     output,
+			TotalSize:      totalSize,
+			FileCount:      fileCount,
+			FileSizeMin:    fileSizeMin,
+			FileSizeMax:    fileSizeMax,
+			PIIPercent:     piiPercent,
+			PIIType:        piiType,
+			FillerPercent:  fillerPercent,
+			Formats:        []string{"csv", "json", "txt"},
+			DirectoryDepth: 3,
+			Seed:           int64(seed),
+		}
+	}
+
+	// Validate before sending
 	enhancedOpts, err := opts.ToEnhancedOptions()
 	if err != nil {
 		return fmt.Errorf("invalid options: %w", err)
 	}
-	
-	// Create validator
+
 	v := validator.New()
-	
-	// Validate inputs
-	fmt.Println("🔍 Validating options...")
+
+	fmt.Println("Validating options...")
 	validation := v.ValidateAll(enhancedOpts)
 	if validation.HasErrors() {
 		return fmt.Errorf("validation failed:\n%s", validation.ErrorMessages())
 	}
-	
-	// Validate disk space
+
 	diskValidation, diskInfo := v.ValidateDiskSpace(enhancedOpts)
 	if diskValidation.HasErrors() {
 		return fmt.Errorf("disk space validation failed:\n%s", diskValidation.ErrorMessages())
 	}
-	
-	// Show warnings if any
+
 	if len(validation.Warnings) > 0 || len(diskValidation.Warnings) > 0 {
-		fmt.Println("\n⚠️  Warnings:")
+		fmt.Println("\nWarnings:")
 		if len(validation.Warnings) > 0 {
 			fmt.Println(validation.WarningMessages())
 		}
 		if len(diskValidation.Warnings) > 0 {
 			fmt.Println(diskValidation.WarningMessages())
 		}
-		
 		fmt.Print("\nProceed anyway? [y/N]: ")
 		var response string
 		fmt.Scanln(&response)
@@ -568,81 +614,122 @@ func generateQuick(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 	}
-	
-	// Show plan summary
-	fmt.Println("\n📋 Generation Plan:")
-	if totalSize != "" {
-		fmt.Printf("  Mode: Size-constrained (%s)\n", totalSize)
+
+	// Show plan
+	fmt.Println("\nGeneration Plan:")
+	if opts.TotalSize != "" {
+		fmt.Printf("  Mode:    size-constrained (%s)\n", opts.TotalSize)
 	} else {
-		fmt.Printf("  Mode: Count-constrained (%d files)\n", fileCount)
+		fmt.Printf("  Mode:    count-constrained (%d files)\n", opts.FileCount)
 	}
-	fmt.Printf("  Output: %s\n", output)
-	fmt.Printf("  File Size: %s - %s\n", fileSizeMin, fileSizeMax)
-	fmt.Printf("  Distribution:\n")
-	fmt.Printf("    • PII (%s): %.0f%%\n", piiType, piiPercent)
-	fmt.Printf("    • Filler: %.0f%%\n", fillerPercent)
-	fmt.Printf("  Formats: csv, json, txt\n")
-	
+	fmt.Printf("  Output:  %s\n", opts.OutputPath)
+	fmt.Printf("  Files:   %s - %s\n", opts.FileSizeMin, opts.FileSizeMax)
+	fmt.Printf("  PII:     %.0f%% (%s)\n", opts.PIIPercent, opts.PIIType)
+	fmt.Printf("  Filler:  %.0f%%\n", opts.FillerPercent)
+
 	if diskInfo != nil {
-		fmt.Printf("\n💾 Disk Space:\n")
-		fmt.Printf("  Available: %s (after safety margin)\n", 
-			models.FormatBytes(diskInfo.Available))
-		fmt.Printf("  Will use: ~%s\n", 
-			models.FormatBytes(diskInfo.RequiredSpace))
+		fmt.Printf("\nDisk Space:\n")
+		fmt.Printf("  Available: %s\n", models.FormatBytes(diskInfo.Available))
+		fmt.Printf("  Required:  ~%s\n", models.FormatBytes(diskInfo.RequiredSpace))
 	}
-	
+
 	fmt.Print("\nStart generation? [Y/n]: ")
-	var response string
-	fmt.Scanln(&response)
-	if response == "n" || response == "N" {
+	var confirm string
+	fmt.Scanln(&confirm)
+	if confirm == "n" || confirm == "N" {
 		fmt.Println("Cancelled.")
 		return nil
 	}
-	
-	// Prepare request for API
-	fmt.Println("\n🚀 Starting generation...")
-	fmt.Println("(Sending request to server...)")
-	
-	// Build JSON request
-	requestData := map[string]interface{}{
-		"name":           name,
-		"output_path":    output,
-		"file_size_min":  fileSizeMin,
-		"file_size_max":  fileSizeMax,
-		"pii_percent":    piiPercent,
-		"pii_type":       piiType,
-		"filler_percent": fillerPercent,
-		"formats":        []string{"csv", "json", "txt"},
-		"seed":           seed,
+
+	watch, _ := cmd.Flags().GetBool("watch")
+
+	fmt.Println("\nStarting generation...")
+
+	jsonData, err := json.Marshal(opts)
+	if err != nil {
+		return fmt.Errorf("failed to encode request: %w", err)
 	}
-	
-	// Add either total_size or file_count
-	if totalSize != "" {
-		requestData["total_size"] = totalSize
-	} else {
-		requestData["file_count"] = fileCount
+
+	// Open WebSocket before firing the request so we don't miss early events
+	var wsConn *websocket.Conn
+	if watch {
+		wsURL := "ws://" + strings.TrimPrefix(apiURL, "http://") + "/ws/v1/activity"
+		wsConn, _, err = websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not connect to WebSocket (%v) — proceeding without watch\n", err)
+			watch = false
+		}
 	}
-	
-	jsonData, _ := json.Marshal(requestData)
-	
-	// Call API endpoint
-	// NOTE: You'll need to implement /api/v1/generate/enhanced on the server
+
 	resp, err := http.Post(apiURL+"/api/v1/generate/enhanced", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
+		if wsConn != nil {
+			wsConn.Close()
+		}
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	body, _ := io.ReadAll(resp.Body)
-	
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		if wsConn != nil {
+			wsConn.Close()
+		}
 		return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(body))
 	}
-	
-	fmt.Println("✅ Generation started!")
-	fmt.Println("   Check server logs for progress")
-	fmt.Println("   Or use the web UI to monitor: http://localhost:8080")
-	
+
+	fmt.Println("Generation started.")
+
+	if !watch {
+		fmt.Printf("Monitor: ws://%s/ws/v1/activity\n", strings.TrimPrefix(apiURL, "http://"))
+		return nil
+	}
+
+	defer wsConn.Close()
+	fmt.Println("Streaming progress (Ctrl+C to detach)...\n")
+
+	for {
+		_, msg, err := wsConn.ReadMessage()
+		if err != nil {
+			break
+		}
+
+		var event map[string]interface{}
+		if err := json.Unmarshal(msg, &event); err != nil {
+			continue
+		}
+
+		eventType, _ := event["type"].(string)
+		if !strings.HasPrefix(eventType, "enhanced_generation_") {
+			continue
+		}
+
+		switch eventType {
+		case "enhanced_generation_progress":
+			current, _ := event["current"].(float64)
+			total, _ := event["total"].(float64)
+			pct, _ := event["percent"].(float64)
+			file, _ := event["current_file"].(string)
+			fmt.Printf("\r  [%d/%d] %.1f%%  %s          ",
+				int(current), int(total), pct, file)
+		case "enhanced_generation_completed":
+			filesCreated, _ := event["files_created"].(float64)
+			bytesWritten, _ := event["bytes_written"].(float64)
+			durationMs, _ := event["duration_ms"].(float64)
+			fmt.Printf("\n\nComplete: %d files, %s in %.1fs\n",
+				int(filesCreated),
+				models.FormatBytes(int64(bytesWritten)),
+				durationMs/1000)
+			return nil
+		case "enhanced_generation_failed":
+			errMsg, _ := event["error"].(string)
+			fmt.Println()
+			return fmt.Errorf("generation failed: %s", errMsg)
+		}
+	}
+
 	return nil
 }
+
 // ==============================================
