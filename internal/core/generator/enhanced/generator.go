@@ -226,7 +226,18 @@ func (g *Generator) generateFiles(
 		if info != nil {
 			result.BytesWritten += info.Size()
 		}
-		
+
+		// Register file in DB if a scenario ID was provided
+		if opts.ScenarioID != "" {
+			dataType := opts.Distribution.PIIType
+			if fileType == resolver.FileTypeFiller {
+				dataType = "filler"
+			}
+			if trackErr := g.tracker.TrackFile(opts.ScenarioID, filePath, dataType); trackErr != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("track %s: %w", filePath, trackErr))
+			}
+		}
+
 		result.FilesCreated++
 		
 		// Report progress

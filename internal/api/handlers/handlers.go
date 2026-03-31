@@ -266,6 +266,7 @@ func (h *Handlers) EncryptFiles(w http.ResponseWriter, r *http.Request) {
 		Percentage float64 `json:"percentage"`
 		Password   string  `json:"password"`
 		Mode       string  `json:"mode"`
+		Workers    int     `json:"workers"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -280,7 +281,11 @@ func (h *Handlers) EncryptFiles(w http.ResponseWriter, r *http.Request) {
 
 	// Start encryption in background
 	go func() {
-		enc := encryptor.New(h.db, req.Password, 4)
+		workers := req.Workers
+		if workers < 1 {
+			workers = 4
+		}
+		enc := encryptor.New(h.db, req.Password, workers)
 
 		opts := encryptor.DefaultOptions()
 		if req.Mode == "full" {
@@ -354,14 +359,15 @@ func (h *Handlers) DestroyScenario(w http.ResponseWriter, r *http.Request) {
 			deleted++
 		}
 
-		// Mark scenario status as destroyed
-		scenario, err := h.scenarioManager.Get(id)
-		if err == nil {
-			h.scenarioManager.Update(id, map[string]interface{}{
-				"status": "destroyed",
-			})
-			_ = scenario
+		// Remove the payload directory tree entirely (leaves no empty dirs behind)
+		if cfg, err := h.scenarioManager.GetConfig(id); err == nil && cfg.Generation.Root != "" {
+			os.RemoveAll(cfg.Generation.Root)
 		}
+
+		// Mark scenario status as destroyed
+		h.scenarioManager.Update(id, map[string]interface{}{
+			"status": "destroyed",
+		})
 
 		h.hub.Broadcast(map[string]interface{}{
 			"type":        "destroy_completed",
@@ -427,8 +433,8 @@ func (h *Handlers) GetManifest(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	// Create temp file
-	tmpFile := fmt.Sprintf("/tmp/manifest-%s-%d.csv", id, time.Now().Unix())
+	// Create temp file in OS temp dir (cross-platform)
+	tmpFile := fmt.Sprintf("%s/manifest-%s-%d.csv", os.TempDir(), id, time.Now().Unix())
 
 	if err := h.tracker.ExportCSV(id, tmpFile); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -535,39 +541,67 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create a scenario record directly so generated files are queryable via the standard APIs.
+	// We bypass scenarioManager.Create() to avoid legacy config validation that doesn't apply here.
+	scenarioRecord := &models.Scenario{
+		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
+		Name:        req.Name,
+		Description: fmt.Sprintf("Enhanced generation: %s", req.OutputPath),
+		Type:        "enhanced",
+		Config:      "{}",
+		Status:      "pending",
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	if err := h.db.CreateScenario(scenarioRecord); err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("create scenario: %s", err))
+		return
+	}
+	scenarioID := scenarioRecord.ID
+
+	req.ScenarioID = scenarioID
+
 	go func() {
+		h.scenarioManager.UpdateStatus(scenarioID, "generating")
+
 		h.hub.Broadcast(map[string]interface{}{
-			"type": "enhanced_generation_started",
-			"name": req.Name,
-			"time": time.Now().UTC(),
+			"type":        "enhanced_generation_started",
+			"scenario_id": scenarioID,
+			"name":        req.Name,
+			"time":        time.Now().UTC(),
 		})
 
 		result, err := enhanced.QuickGenerate(h.db, req, func(p enhanced.Progress) {
 			h.hub.Broadcast(map[string]interface{}{
-				"type":           "enhanced_generation_progress",
-				"name":           req.Name,
-				"current":        p.Current,
-				"total":          p.Total,
-				"percent":        p.Percent,
-				"current_file":   p.CurrentFile,
-				"bytes_written":  p.BytesWritten,
-				"status":         p.Status,
-				"time":           time.Now().UTC(),
+				"type":          "enhanced_generation_progress",
+				"scenario_id":   scenarioID,
+				"name":          req.Name,
+				"current":       p.Current,
+				"total":         p.Total,
+				"percent":       p.Percent,
+				"current_file":  p.CurrentFile,
+				"bytes_written": p.BytesWritten,
+				"status":        p.Status,
+				"time":          time.Now().UTC(),
 			})
 		})
 
 		if err != nil {
+			h.scenarioManager.UpdateStatus(scenarioID, "failed")
 			h.hub.Broadcast(map[string]interface{}{
-				"type":  "enhanced_generation_failed",
-				"name":  req.Name,
-				"error": err.Error(),
-				"time":  time.Now().UTC(),
+				"type":        "enhanced_generation_failed",
+				"scenario_id": scenarioID,
+				"name":        req.Name,
+				"error":       err.Error(),
+				"time":        time.Now().UTC(),
 			})
 			return
 		}
 
+		h.scenarioManager.UpdateStatus(scenarioID, "ready")
 		h.hub.Broadcast(map[string]interface{}{
 			"type":          "enhanced_generation_completed",
+			"scenario_id":   scenarioID,
 			"name":          req.Name,
 			"files_created": result.FilesCreated,
 			"bytes_written": result.BytesWritten,
@@ -576,8 +610,9 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 		})
 	}()
 
-	respondJSON(w, http.StatusAccepted, map[string]string{
-		"message": "Enhanced generation started",
+	respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"message":     "Enhanced generation started",
+		"scenario_id": scenarioID,
 	})
 }
 

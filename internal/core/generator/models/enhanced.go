@@ -39,6 +39,7 @@ type ContentDistribution struct {
 
 // EnhancedGenerateOptions combines all options for generation
 type EnhancedGenerateOptions struct {
+	ScenarioID   string              `json:"scenario_id"`   // DB scenario ID for file tracking (empty = no tracking)
 	ScenarioName string              `json:"scenario_name"`
 	OutputPath   string              `json:"output_path"`
 	Constraints  GenerateConstraints `json:"constraints"`

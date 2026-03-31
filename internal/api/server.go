@@ -64,9 +64,9 @@ func (s *Server) setupMiddleware() {
 	// Timeout
 	s.router.Use(middleware.Timeout(60 * time.Second))
 	
-	// CORS
+	// CORS — AllowCredentials requires explicit origins, not wildcard
 	s.router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   []string{"http://localhost:8080", "http://127.0.0.1:8080"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},

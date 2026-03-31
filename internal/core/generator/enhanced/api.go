@@ -10,6 +10,9 @@ import (
 
 // QuickGenerateOptions provides a simplified interface
 type QuickGenerateOptions struct {
+	// Scenario (set by server before generation; not required from client)
+	ScenarioID string `json:"scenario_id,omitempty"`
+
 	// Output
 	Name       string `json:"name"`
 	OutputPath string `json:"output_path"`
@@ -38,6 +41,7 @@ type QuickGenerateOptions struct {
 // ToEnhancedOptions converts QuickGenerateOptions to EnhancedGenerateOptions
 func (q *QuickGenerateOptions) ToEnhancedOptions() (models.EnhancedGenerateOptions, error) {
 	opts := models.EnhancedGenerateOptions{
+		ScenarioID:   q.ScenarioID,
 		ScenarioName: q.Name,
 		OutputPath:   q.OutputPath,
 		Formats:      q.Formats,
