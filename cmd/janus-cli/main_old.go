@@ -1,3 +1,5 @@
+//go:build ignore
+
 // Janus CLI - Command-line interface for Janus
 package main
 

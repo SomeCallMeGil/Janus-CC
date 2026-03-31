@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -Command \"cd ''C:\\\\Users\\\\root_kitsune\\\\Documents\\\\DevRepo\\\\janus_project\\\\janus-v3\\\\janus-v3-github-complete''; & ''C:\\\\Program Files\\\\Go\\\\bin\\\\go.exe'' build -o ''C:\\\\Users\\\\root_kitsune\\\\Documents\\\\DevRepo\\\\janus_project\\\\janus-v3\\\\janus-qa\\\\janus-cli.exe'' .\\\\cmd\\\\janus-cli\\\\ 2>&1\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem ''C:\\\\Users\\\\root_kitsune\\\\Documents\\\\DevRepo\\\\janus_project\\\\janus-v3\\\\janus-qa\\\\'' | Select-Object Name, Length, LastWriteTime\")"
+    ]
+  }
+}

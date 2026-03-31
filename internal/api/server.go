@@ -121,6 +121,9 @@ func (s *Server) setupRoutes() {
 			})
 		})
 
+		// Enhanced generation
+		r.Post("/generate/enhanced", h.EnhancedGenerate)
+
 		// Activity
 		r.Get("/activity", h.GetActivity)
 	})

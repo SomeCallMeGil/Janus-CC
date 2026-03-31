@@ -13,6 +13,7 @@ import (
 	"janus/internal/api/websocket"
 	"janus/internal/core/encryptor"
 	"janus/internal/core/generator"
+	"janus/internal/core/generator/enhanced"
 	"janus/internal/core/scenario"
 	"janus/internal/core/scheduler"
 	"janus/internal/core/tracker"
@@ -481,6 +482,60 @@ func (h *Handlers) GetJobProgress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, progress)
+}
+
+// EnhancedGenerate runs enhanced generation from a QuickGenerateOptions payload
+func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
+	var req enhanced.QuickGenerateOptions
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	go func() {
+		h.hub.Broadcast(map[string]interface{}{
+			"type": "enhanced_generation_started",
+			"name": req.Name,
+			"time": time.Now().UTC(),
+		})
+
+		result, err := enhanced.QuickGenerate(h.db, req, func(p enhanced.Progress) {
+			h.hub.Broadcast(map[string]interface{}{
+				"type":           "enhanced_generation_progress",
+				"name":           req.Name,
+				"current":        p.Current,
+				"total":          p.Total,
+				"percent":        p.Percent,
+				"current_file":   p.CurrentFile,
+				"bytes_written":  p.BytesWritten,
+				"status":         p.Status,
+				"time":           time.Now().UTC(),
+			})
+		})
+
+		if err != nil {
+			h.hub.Broadcast(map[string]interface{}{
+				"type":  "enhanced_generation_failed",
+				"name":  req.Name,
+				"error": err.Error(),
+				"time":  time.Now().UTC(),
+			})
+			return
+		}
+
+		h.hub.Broadcast(map[string]interface{}{
+			"type":          "enhanced_generation_completed",
+			"name":          req.Name,
+			"files_created": result.FilesCreated,
+			"bytes_written": result.BytesWritten,
+			"duration_ms":   result.Duration.Milliseconds(),
+			"time":          time.Now().UTC(),
+		})
+	}()
+
+	respondJSON(w, http.StatusAccepted, map[string]string{
+		"message": "Enhanced generation started",
+	})
 }
 
 // GetActivity gets activity log
