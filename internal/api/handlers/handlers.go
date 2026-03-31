@@ -15,10 +15,12 @@ import (
 	"janus/internal/core/encryptor"
 	"janus/internal/core/generator"
 	"janus/internal/core/generator/enhanced"
+	"janus/internal/core/profiles"
 	"janus/internal/core/scenario"
 	"janus/internal/core/scheduler"
 	"janus/internal/core/tracker"
 	"janus/internal/database/models"
+	"janus/internal/database/sqlite"
 )
 
 // Handlers contains all HTTP handlers
@@ -29,10 +31,18 @@ type Handlers struct {
 	generator       *generator.Generator
 	scheduler       *scheduler.Scheduler
 	tracker         *tracker.Tracker
+	profileManager  *profiles.Manager
 }
 
 // New creates new handlers
 func New(db models.Database, hub *websocket.Hub) *Handlers {
+	var profileMgr *profiles.Manager
+	if sqlDB, ok := db.(*sqlite.SQLiteDB); ok {
+		store := profiles.NewSQLiteStore(sqlDB)
+		profileMgr = profiles.New(store)
+		seedDefaultProfiles(profileMgr)
+	}
+
 	return &Handlers{
 		db:              db,
 		hub:             hub,
@@ -40,6 +50,16 @@ func New(db models.Database, hub *websocket.Hub) *Handlers {
 		generator:       generator.New(db),
 		scheduler:       scheduler.New(db),
 		tracker:         tracker.New(db),
+		profileManager:  profileMgr,
+	}
+}
+
+// seedDefaultProfiles inserts built-in profiles if they don't already exist.
+func seedDefaultProfiles(mgr *profiles.Manager) {
+	for _, d := range profiles.DefaultProfiles {
+		opts := d.Options
+		opts.Name = d.Name
+		mgr.Create(d.Name, d.Description, opts) // silently skips if name already exists
 	}
 }
 
@@ -637,5 +657,188 @@ func (h *Handlers) GetActivity(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"logs":  logs,
 		"count": len(logs),
+	})
+}
+
+// --- Profile handlers ---
+
+// ListProfiles returns all saved profiles
+func (h *Handlers) ListProfiles(w http.ResponseWriter, r *http.Request) {
+	if h.profileManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Profile manager unavailable")
+		return
+	}
+	list, err := h.profileManager.List()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"profiles": list,
+		"count":    len(list),
+	})
+}
+
+// CreateProfile creates a new profile
+func (h *Handlers) CreateProfile(w http.ResponseWriter, r *http.Request) {
+	if h.profileManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Profile manager unavailable")
+		return
+	}
+	var req struct {
+		Name        string                       `json:"name"`
+		Description string                       `json:"description"`
+		Options     enhanced.QuickGenerateOptions `json:"options"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	p, err := h.profileManager.Create(req.Name, req.Description, req.Options)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusCreated, p)
+}
+
+// GetProfile retrieves a profile by ID
+func (h *Handlers) GetProfile(w http.ResponseWriter, r *http.Request) {
+	if h.profileManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Profile manager unavailable")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	p, err := h.profileManager.Get(id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, p)
+}
+
+// UpdateProfile applies partial updates to a profile
+func (h *Handlers) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	if h.profileManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Profile manager unavailable")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var updates map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	p, err := h.profileManager.Update(id, updates)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, p)
+}
+
+// DeleteProfile removes a profile
+func (h *Handlers) DeleteProfile(w http.ResponseWriter, r *http.Request) {
+	if h.profileManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Profile manager unavailable")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.profileManager.Delete(id); err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]string{"message": "Profile deleted"})
+}
+
+// GenerateFromProfile triggers enhanced generation using a saved profile
+func (h *Handlers) GenerateFromProfile(w http.ResponseWriter, r *http.Request) {
+	if h.profileManager == nil {
+		respondError(w, http.StatusServiceUnavailable, "Profile manager unavailable")
+		return
+	}
+	id := chi.URLParam(r, "id")
+
+	// Optional overrides in request body
+	var overrides map[string]interface{}
+	json.NewDecoder(r.Body).Decode(&overrides) // ignore decode error — overrides are optional
+
+	opts, err := h.profileManager.Resolve(id, overrides)
+	if err != nil {
+		respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Delegate to the same logic as EnhancedGenerate by re-encoding and calling internally
+	scenarioRecord := &models.Scenario{
+		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
+		Name:        opts.Name,
+		Description: fmt.Sprintf("Profile generation: %s", opts.OutputPath),
+		Type:        "enhanced",
+		Config:      "{}",
+		Status:      "pending",
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	if err := h.db.CreateScenario(scenarioRecord); err != nil {
+		respondError(w, http.StatusInternalServerError, fmt.Sprintf("create scenario: %s", err))
+		return
+	}
+	opts.ScenarioID = scenarioRecord.ID
+
+	go func() {
+		h.scenarioManager.UpdateStatus(scenarioRecord.ID, "generating")
+		h.hub.Broadcast(map[string]interface{}{
+			"type":        "enhanced_generation_started",
+			"scenario_id": scenarioRecord.ID,
+			"name":        opts.Name,
+			"profile_id":  id,
+			"time":        time.Now().UTC(),
+		})
+
+		result, err := enhanced.QuickGenerate(h.db, opts, func(p enhanced.Progress) {
+			h.hub.Broadcast(map[string]interface{}{
+				"type":          "enhanced_generation_progress",
+				"scenario_id":   scenarioRecord.ID,
+				"current":       p.Current,
+				"total":         p.Total,
+				"percent":       p.Percent,
+				"current_file":  p.CurrentFile,
+				"bytes_written": p.BytesWritten,
+				"status":        p.Status,
+				"time":          time.Now().UTC(),
+			})
+		})
+
+		if err != nil {
+			h.scenarioManager.UpdateStatus(scenarioRecord.ID, "failed")
+			h.hub.Broadcast(map[string]interface{}{
+				"type":        "enhanced_generation_failed",
+				"scenario_id": scenarioRecord.ID,
+				"error":       err.Error(),
+				"time":        time.Now().UTC(),
+			})
+			return
+		}
+
+		h.scenarioManager.UpdateStatus(scenarioRecord.ID, "ready")
+		h.hub.Broadcast(map[string]interface{}{
+			"type":          "enhanced_generation_completed",
+			"scenario_id":   scenarioRecord.ID,
+			"files_created": result.FilesCreated,
+			"bytes_written": result.BytesWritten,
+			"duration_ms":   result.Duration.Milliseconds(),
+			"time":          time.Now().UTC(),
+		})
+	}()
+
+	respondJSON(w, http.StatusAccepted, map[string]interface{}{
+		"message":     "Generation started",
+		"scenario_id": scenarioRecord.ID,
+		"profile_id":  id,
 	})
 }

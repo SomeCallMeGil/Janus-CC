@@ -168,7 +168,66 @@ func main() {
 	}
 	genCmd.AddCommand(generateQuickCmd)
 	genCmd.AddCommand(presetsCmd)
-	// ============================================
+
+	// Profile commands
+	profileCmd := &cobra.Command{
+		Use:   "profile",
+		Short: "Manage generation profiles",
+	}
+
+	profileCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new profile",
+		RunE:  createProfile,
+	}
+	profileCreateCmd.Flags().String("name", "", "Profile name (required)")
+	profileCreateCmd.Flags().String("description", "", "Profile description")
+	profileCreateCmd.Flags().String("total-size", "", "Total size (e.g. 5GB) — size mode")
+	profileCreateCmd.Flags().Int("file-count", 0, "Number of files — count mode")
+	profileCreateCmd.Flags().String("file-size-min", "1KB", "Minimum file size")
+	profileCreateCmd.Flags().String("file-size-max", "10MB", "Maximum file size")
+	profileCreateCmd.Flags().Float64("pii-percent", 10, "PII percentage (0-100)")
+	profileCreateCmd.Flags().String("pii-type", "standard", "PII type: standard, healthcare, financial")
+	profileCreateCmd.Flags().Float64("filler-percent", 90, "Filler percentage")
+	profileCreateCmd.Flags().String("output", "./payloads", "Output directory")
+	profileCreateCmd.Flags().Int("seed", 0, "Seed for reproducible generation (0=random)")
+	profileCreateCmd.MarkFlagRequired("name")
+
+	profileListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List all profiles",
+		RunE:  listProfiles,
+	}
+
+	profileGetCmd := &cobra.Command{
+		Use:   "get [id]",
+		Short: "Show profile details",
+		Args:  cobra.ExactArgs(1),
+		RunE:  getProfile,
+	}
+
+	profileDeleteCmd := &cobra.Command{
+		Use:   "delete [id]",
+		Short: "Delete a profile",
+		Args:  cobra.ExactArgs(1),
+		RunE:  deleteProfile,
+	}
+
+	profileCmd.AddCommand(profileCreateCmd)
+	profileCmd.AddCommand(profileListCmd)
+	profileCmd.AddCommand(profileGetCmd)
+	profileCmd.AddCommand(profileDeleteCmd)
+
+	// gen profile <id> [--watch]
+	genProfileCmd := &cobra.Command{
+		Use:   "profile [id]",
+		Short: "Generate using a saved profile",
+		Args:  cobra.ExactArgs(1),
+		RunE:  generateFromProfile,
+	}
+	genProfileCmd.Flags().String("output", "", "Override output directory")
+	genProfileCmd.Flags().Bool("watch", false, "Stream progress via WebSocket until complete")
+	genCmd.AddCommand(genProfileCmd)
 
 	// Add all commands
 	rootCmd.AddCommand(scenarioCmd)
@@ -177,7 +236,8 @@ func main() {
 	rootCmd.AddCommand(jobCmd)
 	rootCmd.AddCommand(exportCmd)
 	rootCmd.AddCommand(healthCmd)
-	rootCmd.AddCommand(genCmd)  // ===== ADDED: Enhanced gen command =====
+	rootCmd.AddCommand(genCmd)
+	rootCmd.AddCommand(profileCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -733,3 +793,220 @@ func generateQuick(cmd *cobra.Command, args []string) error {
 }
 
 // ==============================================
+
+// --- Profile command implementations ---
+
+func createProfile(cmd *cobra.Command, args []string) error {
+	name, _ := cmd.Flags().GetString("name")
+	description, _ := cmd.Flags().GetString("description")
+	totalSize, _ := cmd.Flags().GetString("total-size")
+	fileCount, _ := cmd.Flags().GetInt("file-count")
+	fileSizeMin, _ := cmd.Flags().GetString("file-size-min")
+	fileSizeMax, _ := cmd.Flags().GetString("file-size-max")
+	piiPercent, _ := cmd.Flags().GetFloat64("pii-percent")
+	piiType, _ := cmd.Flags().GetString("pii-type")
+	fillerPercent, _ := cmd.Flags().GetFloat64("filler-percent")
+	output, _ := cmd.Flags().GetString("output")
+	seed, _ := cmd.Flags().GetInt("seed")
+
+	if totalSize == "" && fileCount == 0 {
+		return fmt.Errorf("specify either --total-size or --file-count")
+	}
+
+	reqBody := map[string]interface{}{
+		"name":        name,
+		"description": description,
+		"options": map[string]interface{}{
+			"name":           name,
+			"output_path":    output,
+			"total_size":     totalSize,
+			"file_count":     fileCount,
+			"file_size_min":  fileSizeMin,
+			"file_size_max":  fileSizeMax,
+			"pii_percent":    piiPercent,
+			"pii_type":       piiType,
+			"filler_percent": fillerPercent,
+			"formats":        []string{"csv", "json", "txt"},
+			"seed":           seed,
+		},
+	}
+
+	body, err := apiPost("/api/v1/profiles", reqBody)
+	if err != nil {
+		return err
+	}
+
+	if outputJSON {
+		fmt.Println(string(body))
+		return nil
+	}
+
+	var p struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	json.Unmarshal(body, &p)
+	fmt.Printf("Created profile: %s (ID: %s)\n", p.Name, p.ID)
+	return nil
+}
+
+func listProfiles(cmd *cobra.Command, args []string) error {
+	body, err := apiGet("/api/v1/profiles")
+	if err != nil {
+		return err
+	}
+
+	if outputJSON {
+		fmt.Println(string(body))
+		return nil
+	}
+
+	var result struct {
+		Profiles []struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Options     struct {
+				TotalSize  string  `json:"total_size"`
+				FileCount  int     `json:"file_count"`
+				PIIPercent float64 `json:"pii_percent"`
+				PIIType    string  `json:"pii_type"`
+			} `json:"options"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return err
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tMODE\tSIZE/COUNT\tPII%\tTYPE")
+	for _, p := range result.Profiles {
+		mode := "count"
+		constraint := fmt.Sprintf("%d files", p.Options.FileCount)
+		if p.Options.TotalSize != "" {
+			mode = "size"
+			constraint = p.Options.TotalSize
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.0f%%\t%s\n",
+			p.ID[:8], p.Name, mode, constraint, p.Options.PIIPercent, p.Options.PIIType)
+	}
+	w.Flush()
+	return nil
+}
+
+func getProfile(cmd *cobra.Command, args []string) error {
+	body, err := apiGet("/api/v1/profiles/" + args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(body))
+	return nil
+}
+
+func deleteProfile(cmd *cobra.Command, args []string) error {
+	req, err := http.NewRequest("DELETE", apiURL+"/api/v1/profiles/"+args[0], nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API error: %s", string(b))
+	}
+	fmt.Printf("Deleted profile: %s\n", args[0])
+	return nil
+}
+
+func generateFromProfile(cmd *cobra.Command, args []string) error {
+	id := args[0]
+	watch, _ := cmd.Flags().GetBool("watch")
+
+	overrides := map[string]interface{}{}
+	if cmd.Flags().Changed("output") {
+		output, _ := cmd.Flags().GetString("output")
+		overrides["output_path"] = output
+	}
+
+	var wsConn *websocket.Conn
+	if watch {
+		wsURL := "ws://" + strings.TrimPrefix(apiURL, "http://") + "/ws/v1/activity"
+		var err error
+		wsConn, _, err = websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not connect to WebSocket (%v) — proceeding without watch\n", err)
+			watch = false
+		}
+	}
+
+	body, err := apiPost("/api/v1/profiles/"+id+"/generate", overrides)
+	if err != nil {
+		if wsConn != nil {
+			wsConn.Close()
+		}
+		return err
+	}
+
+	if outputJSON {
+		fmt.Println(string(body))
+		if wsConn != nil {
+			wsConn.Close()
+		}
+		return nil
+	}
+
+	var genResp struct {
+		ScenarioID string `json:"scenario_id"`
+	}
+	json.Unmarshal(body, &genResp)
+	fmt.Printf("Generation started (scenario: %s)\n", genResp.ScenarioID)
+
+	if !watch {
+		if wsConn != nil {
+			wsConn.Close()
+		}
+		return nil
+	}
+
+	defer wsConn.Close()
+	fmt.Println("Streaming progress (Ctrl+C to detach)...\n")
+
+	for {
+		_, msg, err := wsConn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var event map[string]interface{}
+		if err := json.Unmarshal(msg, &event); err != nil {
+			continue
+		}
+		eventType, _ := event["type"].(string)
+		if !strings.HasPrefix(eventType, "enhanced_generation_") {
+			continue
+		}
+		switch eventType {
+		case "enhanced_generation_progress":
+			current, _ := event["current"].(float64)
+			total, _ := event["total"].(float64)
+			pct, _ := event["percent"].(float64)
+			file, _ := event["current_file"].(string)
+			fmt.Printf("\r  [%d/%d] %.1f%%  %s          ",
+				int(current), int(total), pct, file)
+		case "enhanced_generation_completed":
+			filesCreated, _ := event["files_created"].(float64)
+			bytesWritten, _ := event["bytes_written"].(float64)
+			durationMs, _ := event["duration_ms"].(float64)
+			fmt.Printf("\n\nComplete: %d files, %.1f MB in %.1fs\n",
+				int(filesCreated), float64(bytesWritten)/1024/1024, durationMs/1000)
+			return nil
+		case "enhanced_generation_failed":
+			errMsg, _ := event["error"].(string)
+			fmt.Println()
+			return fmt.Errorf("generation failed: %s", errMsg)
+		}
+	}
+	return nil
+}

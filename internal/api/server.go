@@ -124,6 +124,19 @@ func (s *Server) setupRoutes() {
 		// Enhanced generation
 		r.Post("/generate/enhanced", h.EnhancedGenerate)
 
+		// Profiles
+		r.Route("/profiles", func(r chi.Router) {
+			r.Get("/", h.ListProfiles)
+			r.Post("/", h.CreateProfile)
+
+			r.Route("/{id}", func(r chi.Router) {
+				r.Get("/", h.GetProfile)
+				r.Put("/", h.UpdateProfile)
+				r.Delete("/", h.DeleteProfile)
+				r.Post("/generate", h.GenerateFromProfile)
+			})
+		})
+
 		// Activity
 		r.Get("/activity", h.GetActivity)
 	})

@@ -142,6 +142,17 @@ func (s *SQLiteDB) Migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 	CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_activity_level ON activity_log(level);
+
+	CREATE TABLE IF NOT EXISTS profiles (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		description TEXT,
+		options_json TEXT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -612,6 +623,81 @@ func (s *SQLiteDB) GetPendingJobs() ([]*models.Job, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+// CreateProfile inserts a new profile record
+func (s *SQLiteDB) CreateProfile(id, name, description, optionsJSON string, createdAt, updatedAt time.Time) error {
+	_, err := s.db.Exec(
+		`INSERT INTO profiles (id, name, description, options_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, name, description, optionsJSON, createdAt, updatedAt,
+	)
+	return err
+}
+
+// GetProfile retrieves a profile by ID
+func (s *SQLiteDB) GetProfile(id string) (pid, name, description, optionsJSON string, createdAt, updatedAt time.Time, err error) {
+	err = s.db.QueryRow(
+		`SELECT id, name, description, options_json, created_at, updated_at FROM profiles WHERE id = ?`, id,
+	).Scan(&pid, &name, &description, &optionsJSON, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		err = fmt.Errorf("profile not found: %s", id)
+	}
+	return
+}
+
+// GetProfileByName retrieves a profile by name
+func (s *SQLiteDB) GetProfileByName(name string) (id, pname, description, optionsJSON string, createdAt, updatedAt time.Time, err error) {
+	err = s.db.QueryRow(
+		`SELECT id, name, description, options_json, created_at, updated_at FROM profiles WHERE name = ?`, name,
+	).Scan(&id, &pname, &description, &optionsJSON, &createdAt, &updatedAt)
+	if err == sql.ErrNoRows {
+		err = nil // not found is not an error — caller checks empty id
+	}
+	return
+}
+
+// ProfileRow is a single row returned by ListProfiles.
+type ProfileRow struct {
+	ID          string
+	Name        string
+	Description string
+	OptionsJSON string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// ListProfiles returns all profiles ordered by name
+func (s *SQLiteDB) ListProfiles() ([]ProfileRow, error) {
+	rows, err := s.db.Query(`SELECT id, name, description, options_json, created_at, updated_at FROM profiles ORDER BY name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ProfileRow
+	for rows.Next() {
+		var r ProfileRow
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &r.OptionsJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// UpdateProfile updates a profile record
+func (s *SQLiteDB) UpdateProfile(id, name, description, optionsJSON string, updatedAt time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE profiles SET name = ?, description = ?, options_json = ?, updated_at = ? WHERE id = ?`,
+		name, description, optionsJSON, updatedAt, id,
+	)
+	return err
+}
+
+// DeleteProfile removes a profile by ID
+func (s *SQLiteDB) DeleteProfile(id string) error {
+	_, err := s.db.Exec(`DELETE FROM profiles WHERE id = ?`, id)
+	return err
 }
 
 // Task methods (stubs for distributed mode - not used in standalone)
