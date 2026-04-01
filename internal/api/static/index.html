@@ -1,106 +1,250 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Janus Security Testing Platform</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Janus — Security Testing Platform</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    :root { --accent: #6366f1; }
+    .tab-active   { background: var(--accent); color: #fff; }
+    .tab-inactive { background: #f3f4f6; color: #374151; }
+    .tab-inactive:hover { background: #e5e7eb; }
+    .badge-pending    { background:#dbeafe; color:#1e40af; }
+    .badge-generating { background:#fef3c7; color:#92400e; }
+    .badge-ready      { background:#d1fae5; color:#065f46; }
+    .badge-failed     { background:#fee2e2; color:#991b1b; }
+    .badge-destroyed  { background:#f3f4f6; color:#6b7280; }
+    .badge-encrypted  { background:#ede9fe; color:#5b21b6; }
+    .progress-bar { transition: width 0.3s ease; }
+    .fade-in { animation: fadeIn .15s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:none; } }
+    .modal-backdrop { background: rgba(0,0,0,.45); }
+    #toast-container { pointer-events:none; }
+    .toast { pointer-events:auto; }
+  </style>
 </head>
-<body class="bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <!-- Header -->
-        <div class="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h1 class="text-3xl font-bold text-gray-800">Janus Security Testing Platform</h1>
-            <p class="text-gray-600 mt-2">Generate and encrypt test data for security software validation</p>
-        </div>
+<body class="bg-gray-100 min-h-screen">
 
-        <!-- Navigation -->
-        <div class="bg-white rounded-lg shadow-md p-4 mb-6">
-            <div class="flex space-x-4">
-                <button onclick="showTab('scenarios')" id="tab-scenarios" class="px-4 py-2 rounded bg-blue-500 text-white">Scenarios</button>
-                <button onclick="showTab('jobs')" id="tab-jobs" class="px-4 py-2 rounded bg-gray-200 text-gray-700">Jobs</button>
-                <button onclick="showTab('activity')" id="tab-activity" class="px-4 py-2 rounded bg-gray-200 text-gray-700">Activity</button>
-            </div>
-        </div>
+<!-- Toast container -->
+<div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2 w-80"></div>
 
-        <!-- Scenarios Tab -->
-        <div id="content-scenarios" class="tab-content">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                <!-- Create Scenario -->
-                <div class="bg-white rounded-lg shadow-md p-6">
-                    <h2 class="text-xl font-bold mb-4">Create Scenario</h2>
-                    <form id="create-scenario-form" onsubmit="createScenario(event)">
-                        <div class="mb-4">
-                            <label class="block text-gray-700 mb-2">Name</label>
-                            <input type="text" id="scenario-name" class="w-full px-3 py-2 border rounded" required>
-                        </div>
-                        <div class="mb-4">
-                            <label class="block text-gray-700 mb-2">Template</label>
-                            <select id="scenario-template" class="w-full px-3 py-2 border rounded" required>
-                                <option value="">Select a template...</option>
-                                <option value="healthcare-basic">Healthcare Basic (100 files)</option>
-                                <option value="healthcare-large">Healthcare Large (10,000 files)</option>
-                                <option value="financial-tax">Financial Tax (500 files)</option>
-                                <option value="pii-only">PII Only (1,000 files)</option>
-                            </select>
-                        </div>
-                        <button type="submit" class="w-full bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">
-                            Create Scenario
-                        </button>
-                    </form>
-                </div>
-
-                <!-- Statistics -->
-                <div class="bg-white rounded-lg shadow-md p-6">
-                    <h2 class="text-xl font-bold mb-4">Statistics</h2>
-                    <div id="stats-content">
-                        <p class="text-gray-600">Select a scenario to view statistics</p>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Scenarios List -->
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-xl font-bold">Scenarios</h2>
-                    <button onclick="loadScenarios()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Refresh</button>
-                </div>
-                <div id="scenarios-list">
-                    <p class="text-gray-600">Loading...</p>
-                </div>
-            </div>
-        </div>
-
-        <!-- Jobs Tab -->
-        <div id="content-jobs" class="tab-content hidden">
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-xl font-bold">Encryption Jobs</h2>
-                    <button onclick="loadJobs()" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Refresh</button>
-                </div>
-                <div id="jobs-list">
-                    <p class="text-gray-600">Loading...</p>
-                </div>
-            </div>
-        </div>
-
-        <!-- Activity Tab -->
-        <div id="content-activity" class="tab-content hidden">
-            <div class="bg-white rounded-lg shadow-md p-6">
-                <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-xl font-bold">Live Activity Log</h2>
-                    <div>
-                        <span id="ws-status" class="text-gray-600 mr-4">Disconnected</span>
-                        <button onclick="toggleAutoScroll()" id="autoscroll-btn" class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Auto-scroll: ON</button>
-                    </div>
-                </div>
-                <div id="activity-log" class="bg-gray-50 rounded p-4 h-96 overflow-y-auto font-mono text-sm">
-                    <p class="text-gray-600">Connecting to activity stream...</p>
-                </div>
-            </div>
-        </div>
+<!-- Encrypt modal -->
+<div id="modal-encrypt" class="fixed inset-0 modal-backdrop z-40 hidden flex items-center justify-center">
+  <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md fade-in">
+    <h3 class="text-lg font-bold mb-4">Encrypt Scenario Files</h3>
+    <div class="mb-3">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+      <input id="enc-password" type="password" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" placeholder="Encryption password">
     </div>
+    <div class="mb-3">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Percentage to encrypt: <span id="enc-pct-label">25%</span></label>
+      <input id="enc-percentage" type="range" min="1" max="100" value="25" class="w-full" oninput="document.getElementById('enc-pct-label').textContent=this.value+'%'">
+    </div>
+    <div class="mb-4">
+      <label class="block text-sm font-medium text-gray-700 mb-1">Mode</label>
+      <select id="enc-mode" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+        <option value="partial">Partial (header only — fast)</option>
+        <option value="full">Full encryption</option>
+      </select>
+    </div>
+    <div class="flex space-x-3">
+      <button onclick="submitEncrypt()" class="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 font-medium">Start Encryption</button>
+      <button onclick="closeModal('modal-encrypt')" class="flex-1 border px-4 py-2 rounded-lg hover:bg-gray-50">Cancel</button>
+    </div>
+  </div>
+</div>
 
-    <script src="app.js"></script>
+<!-- Create profile modal -->
+<div id="modal-create-profile" class="fixed inset-0 modal-backdrop z-40 hidden flex items-center justify-center">
+  <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-lg fade-in overflow-y-auto max-h-screen">
+    <h3 class="text-lg font-bold mb-4">Create Profile</h3>
+    <div class="grid grid-cols-2 gap-3 mb-3">
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Name <span class="text-red-500">*</span></label>
+        <input id="cp-name" type="text" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" placeholder="e.g. Healthcare Demo">
+      </div>
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+        <input id="cp-description" type="text" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400" placeholder="Optional description">
+      </div>
+      <div class="col-span-2">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Output Path</label>
+        <input id="cp-output" type="text" value="./payloads" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Mode</label>
+        <select id="cp-mode" onchange="toggleProfileMode()" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+          <option value="count">File count</option>
+          <option value="size">Total size</option>
+        </select>
+      </div>
+      <div id="cp-count-wrap">
+        <label class="block text-sm font-medium text-gray-700 mb-1">File Count</label>
+        <input id="cp-file-count" type="number" value="1000" min="1" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+      </div>
+      <div id="cp-size-wrap" class="hidden">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Total Size</label>
+        <input id="cp-total-size" type="text" placeholder="e.g. 5GB" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Min File Size</label>
+        <input id="cp-size-min" type="text" value="1KB" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Max File Size</label>
+        <input id="cp-size-max" type="text" value="10MB" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">PII % <span id="cp-pii-label" class="text-indigo-600">10%</span></label>
+        <input id="cp-pii-percent" type="range" min="0" max="100" value="10" class="w-full"
+          oninput="document.getElementById('cp-pii-label').textContent=this.value+'%'; document.getElementById('cp-filler-percent').value=100-this.value; document.getElementById('cp-filler-label').textContent=(100-this.value)+'%'">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Filler % <span id="cp-filler-label" class="text-gray-500">90%</span></label>
+        <input id="cp-filler-percent" type="range" min="0" max="100" value="90" class="w-full"
+          oninput="document.getElementById('cp-filler-label').textContent=this.value+'%'; document.getElementById('cp-pii-percent').value=100-this.value; document.getElementById('cp-pii-label').textContent=(100-this.value)+'%'">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">PII Type</label>
+        <select id="cp-pii-type" class="w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+          <option value="standard">Standard</option>
+          <option value="healthcare">Healthcare</option>
+          <option value="financial">Financial</option>
+        </select>
+      </div>
+    </div>
+    <div class="flex space-x-3 mt-2">
+      <button onclick="submitCreateProfile()" class="flex-1 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 font-medium">Create Profile</button>
+      <button onclick="closeModal('modal-create-profile')" class="flex-1 border px-4 py-2 rounded-lg hover:bg-gray-50">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Generation progress overlay -->
+<div id="modal-progress" class="fixed inset-0 modal-backdrop z-40 hidden flex items-center justify-center">
+  <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md fade-in">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-lg font-bold" id="progress-title">Generating...</h3>
+      <span id="progress-status-badge" class="text-xs px-2 py-1 rounded-full badge-generating">Running</span>
+    </div>
+    <div class="mb-2 flex justify-between text-sm text-gray-600">
+      <span id="progress-files">0 / 0 files</span>
+      <span id="progress-pct">0%</span>
+    </div>
+    <div class="w-full bg-gray-200 rounded-full h-3 mb-3">
+      <div id="progress-bar" class="progress-bar bg-indigo-500 h-3 rounded-full" style="width:0%"></div>
+    </div>
+    <p class="text-sm text-gray-500 truncate mb-4" id="progress-current-file">Starting...</p>
+    <div class="flex justify-between text-xs text-gray-400 mb-4">
+      <span id="progress-bytes">0 MB written</span>
+      <span id="progress-scenario">scenario: —</span>
+    </div>
+    <!-- Job control buttons (hidden once job finishes) -->
+    <div id="progress-controls" class="flex space-x-2 mb-3">
+      <button onclick="pauseGeneration()" id="progress-pause-btn"
+        class="flex-1 border border-yellow-300 text-yellow-700 px-3 py-1.5 rounded-lg hover:bg-yellow-50 text-sm font-medium">Pause</button>
+      <button onclick="resumeGeneration()" id="progress-resume-btn"
+        class="flex-1 border border-green-300 text-green-700 px-3 py-1.5 rounded-lg hover:bg-green-50 text-sm font-medium hidden">Resume</button>
+      <button onclick="cancelGeneration()" id="progress-cancel-btn"
+        class="flex-1 border border-red-300 text-red-700 px-3 py-1.5 rounded-lg hover:bg-red-50 text-sm font-medium">Cancel</button>
+    </div>
+    <button onclick="dismissProgress()" id="progress-dismiss-btn" class="hidden w-full border px-4 py-2 rounded-lg hover:bg-gray-50 text-sm">Dismiss</button>
+  </div>
+</div>
+
+<!-- Header -->
+<header class="bg-gray-900 text-white shadow-lg">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-xl font-bold tracking-tight">Janus</h1>
+      <p class="text-gray-400 text-xs">Security Testing Platform</p>
+    </div>
+    <div class="flex items-center space-x-3">
+      <span class="text-xs text-gray-400" id="ws-status-text">Connecting...</span>
+      <span id="ws-dot" class="w-2 h-2 rounded-full bg-yellow-400"></span>
+    </div>
+  </div>
+</header>
+
+<!-- Nav tabs -->
+<div class="max-w-7xl mx-auto px-6 pt-4">
+  <div class="flex space-x-2 mb-6">
+    <button onclick="showTab('generate')" id="tab-generate" class="tab-active px-5 py-2 rounded-lg text-sm font-medium transition-colors">Generate</button>
+    <button onclick="showTab('scenarios')" id="tab-scenarios" class="tab-inactive px-5 py-2 rounded-lg text-sm font-medium transition-colors">Scenarios</button>
+    <button onclick="showTab('jobs')" id="tab-jobs" class="tab-inactive px-5 py-2 rounded-lg text-sm font-medium transition-colors">Jobs</button>
+    <button onclick="showTab('activity')" id="tab-activity" class="tab-inactive px-5 py-2 rounded-lg text-sm font-medium transition-colors">Activity</button>
+  </div>
+
+  <!-- Generate tab -->
+  <div id="content-generate" class="tab-content">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-bold text-gray-800">Generation Profiles</h2>
+      <button onclick="openModal('modal-create-profile')" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700">+ New Profile</button>
+    </div>
+    <div id="profiles-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <p class="text-gray-500 col-span-3">Loading profiles...</p>
+    </div>
+  </div>
+
+  <!-- Scenarios tab -->
+  <div id="content-scenarios" class="tab-content hidden">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+      <!-- Stats panel -->
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <h3 class="font-bold text-gray-700 mb-3">Scenario Stats</h3>
+        <div id="stats-content" class="text-sm text-gray-500">Select a scenario to view stats.</div>
+      </div>
+      <!-- Create scenario -->
+      <div class="lg:col-span-2 bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <h3 class="font-bold text-gray-700 mb-3">Create from Template</h3>
+        <form id="create-scenario-form" onsubmit="createScenario(event)" class="flex gap-3 flex-wrap">
+          <input type="text" id="scenario-name" class="flex-1 min-w-0 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" placeholder="Scenario name" required>
+          <select id="scenario-template" class="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400" required>
+            <option value="">Template...</option>
+            <option value="healthcare-basic">Healthcare Basic</option>
+            <option value="healthcare-large">Healthcare Large</option>
+            <option value="financial-tax">Financial Tax</option>
+            <option value="pii-only">PII Only</option>
+          </select>
+          <button type="submit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700">Create</button>
+        </form>
+      </div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-700">Scenarios</h3>
+        <button onclick="loadScenarios()" class="text-sm text-indigo-600 hover:underline">Refresh</button>
+      </div>
+      <div id="scenarios-list" class="p-4 text-gray-500 text-sm">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Jobs tab -->
+  <div id="content-jobs" class="tab-content hidden">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-700">Encryption Jobs</h3>
+        <button onclick="loadJobs()" class="text-sm text-indigo-600 hover:underline">Refresh</button>
+      </div>
+      <div id="jobs-list" class="p-4 text-gray-500 text-sm">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Activity tab -->
+  <div id="content-activity" class="tab-content hidden">
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-700">Live Activity</h3>
+        <button onclick="toggleAutoScroll()" id="autoscroll-btn" class="text-sm text-indigo-600 hover:underline">Auto-scroll: ON</button>
+      </div>
+      <div id="activity-log" class="font-mono text-xs p-4 h-[32rem] overflow-y-auto bg-gray-950 text-gray-300 rounded-b-xl"></div>
+    </div>
+  </div>
+
+  <div class="h-8"></div>
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>

@@ -46,6 +46,7 @@ type EnhancedGenerateOptions struct {
 	Distribution ContentDistribution `json:"distribution"`
 	Formats      []string            `json:"formats"` // csv, json, txt
 	Seed         int64               `json:"seed"`    // for reproducible generation (0 = random)
+	Workers      int                 `json:"workers"` // parallel file writers (0 = runtime.NumCPU)
 }
 
 // ValidationError represents a validation error

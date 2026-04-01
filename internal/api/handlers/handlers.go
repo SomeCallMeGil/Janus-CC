@@ -2,6 +2,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"janus/internal/api/jobs"
 	"janus/internal/api/websocket"
 	"janus/internal/core/encryptor"
 	"janus/internal/core/generator"
@@ -32,6 +34,7 @@ type Handlers struct {
 	scheduler       *scheduler.Scheduler
 	tracker         *tracker.Tracker
 	profileManager  *profiles.Manager
+	jobRegistry     *jobs.Registry
 }
 
 // New creates new handlers
@@ -51,6 +54,7 @@ func New(db models.Database, hub *websocket.Hub) *Handlers {
 		scheduler:       scheduler.New(db),
 		tracker:         tracker.New(db),
 		profileManager:  profileMgr,
+		jobRegistry:     jobs.NewRegistry(),
 	}
 }
 
@@ -581,17 +585,22 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 
 	req.ScenarioID = scenarioID
 
-	go func() {
-		h.scenarioManager.UpdateStatus(scenarioID, "generating")
+	ctrl := jobs.NewControl(context.Background())
+	h.jobRegistry.Register(scenarioID, ctrl)
 
+	go func() {
+		defer h.jobRegistry.Remove(scenarioID)
+
+		h.scenarioManager.UpdateStatus(scenarioID, "generating")
 		h.hub.Broadcast(map[string]interface{}{
 			"type":        "enhanced_generation_started",
 			"scenario_id": scenarioID,
 			"name":        req.Name,
+			"workers":     req.Workers,
 			"time":        time.Now().UTC(),
 		})
 
-		result, err := enhanced.QuickGenerate(h.db, req, func(p enhanced.Progress) {
+		result, err := enhanced.QuickGenerate(ctrl.Context(), h.db, req, func(p enhanced.Progress) {
 			h.hub.Broadcast(map[string]interface{}{
 				"type":          "enhanced_generation_progress",
 				"scenario_id":   scenarioID,
@@ -604,15 +613,20 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 				"status":        p.Status,
 				"time":          time.Now().UTC(),
 			})
-		})
+		}, ctrl.CheckPoint)
 
 		if err != nil {
-			h.scenarioManager.UpdateStatus(scenarioID, "failed")
+			status := "failed"
+			if err == context.Canceled {
+				status = "cancelled"
+			}
+			h.scenarioManager.UpdateStatus(scenarioID, status)
 			h.hub.Broadcast(map[string]interface{}{
 				"type":        "enhanced_generation_failed",
 				"scenario_id": scenarioID,
 				"name":        req.Name,
 				"error":       err.Error(),
+				"cancelled":   err == context.Canceled,
 				"time":        time.Now().UTC(),
 			})
 			return
@@ -755,6 +769,59 @@ func (h *Handlers) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]string{"message": "Profile deleted"})
 }
 
+// --- Generation job control handlers ---
+
+// PauseGeneration pauses the active generation job for a scenario.
+func (h *Handlers) PauseGeneration(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ctrl, ok := h.jobRegistry.Get(id)
+	if !ok {
+		respondError(w, http.StatusNotFound, "no active generation for this scenario")
+		return
+	}
+	ctrl.Pause()
+	h.hub.Broadcast(map[string]interface{}{
+		"type":        "generation_paused",
+		"scenario_id": id,
+		"time":        time.Now().UTC(),
+	})
+	respondJSON(w, http.StatusOK, map[string]string{"message": "paused"})
+}
+
+// ResumeGeneration resumes a paused generation job.
+func (h *Handlers) ResumeGeneration(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ctrl, ok := h.jobRegistry.Get(id)
+	if !ok {
+		respondError(w, http.StatusNotFound, "no active generation for this scenario")
+		return
+	}
+	ctrl.Resume()
+	h.hub.Broadcast(map[string]interface{}{
+		"type":        "generation_resumed",
+		"scenario_id": id,
+		"time":        time.Now().UTC(),
+	})
+	respondJSON(w, http.StatusOK, map[string]string{"message": "resumed"})
+}
+
+// CancelGeneration cancels an active or paused generation job.
+func (h *Handlers) CancelGeneration(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ctrl, ok := h.jobRegistry.Get(id)
+	if !ok {
+		respondError(w, http.StatusNotFound, "no active generation for this scenario")
+		return
+	}
+	ctrl.Cancel()
+	h.hub.Broadcast(map[string]interface{}{
+		"type":        "generation_cancelled",
+		"scenario_id": id,
+		"time":        time.Now().UTC(),
+	})
+	respondJSON(w, http.StatusOK, map[string]string{"message": "cancelled"})
+}
+
 // GenerateFromProfile triggers enhanced generation using a saved profile
 func (h *Handlers) GenerateFromProfile(w http.ResponseWriter, r *http.Request) {
 	if h.profileManager == nil {
@@ -790,17 +857,23 @@ func (h *Handlers) GenerateFromProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	opts.ScenarioID = scenarioRecord.ID
 
+	ctrl := jobs.NewControl(context.Background())
+	h.jobRegistry.Register(scenarioRecord.ID, ctrl)
+
 	go func() {
+		defer h.jobRegistry.Remove(scenarioRecord.ID)
+
 		h.scenarioManager.UpdateStatus(scenarioRecord.ID, "generating")
 		h.hub.Broadcast(map[string]interface{}{
 			"type":        "enhanced_generation_started",
 			"scenario_id": scenarioRecord.ID,
 			"name":        opts.Name,
 			"profile_id":  id,
+			"workers":     opts.Workers,
 			"time":        time.Now().UTC(),
 		})
 
-		result, err := enhanced.QuickGenerate(h.db, opts, func(p enhanced.Progress) {
+		result, err := enhanced.QuickGenerate(ctrl.Context(), h.db, opts, func(p enhanced.Progress) {
 			h.hub.Broadcast(map[string]interface{}{
 				"type":          "enhanced_generation_progress",
 				"scenario_id":   scenarioRecord.ID,
@@ -812,14 +885,19 @@ func (h *Handlers) GenerateFromProfile(w http.ResponseWriter, r *http.Request) {
 				"status":        p.Status,
 				"time":          time.Now().UTC(),
 			})
-		})
+		}, ctrl.CheckPoint)
 
 		if err != nil {
-			h.scenarioManager.UpdateStatus(scenarioRecord.ID, "failed")
+			status := "failed"
+			if err == context.Canceled {
+				status = "cancelled"
+			}
+			h.scenarioManager.UpdateStatus(scenarioRecord.ID, status)
 			h.hub.Broadcast(map[string]interface{}{
 				"type":        "enhanced_generation_failed",
 				"scenario_id": scenarioRecord.ID,
 				"error":       err.Error(),
+				"cancelled":   err == context.Canceled,
 				"time":        time.Now().UTC(),
 			})
 			return

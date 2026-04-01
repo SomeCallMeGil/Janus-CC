@@ -2,11 +2,14 @@
 package enhanced
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -63,8 +66,12 @@ type GenerationResult struct {
 	Errors       []error
 }
 
-// Generate performs enhanced file generation with full validation
-func (g *Generator) Generate(opts models.EnhancedGenerateOptions, callback ProgressCallback) (*GenerationResult, error) {
+// Generate performs enhanced file generation with full validation.
+// ctx is used for cancellation; checkpoint is called between files (pass nil for no control).
+func (g *Generator) Generate(ctx context.Context, opts models.EnhancedGenerateOptions, callback ProgressCallback, checkpoint func() error) (*GenerationResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	startTime := time.Now()
 	
 	result := &GenerationResult{
@@ -151,7 +158,7 @@ func (g *Generator) Generate(opts models.EnhancedGenerateOptions, callback Progr
 		OutputPath:        opts.OutputPath,
 	}
 	
-	err = g.generateFiles(opts, plan, monitor, callback, result)
+	err = g.generateFiles(ctx, opts, plan, monitor, callback, checkpoint, result)
 	if err != nil {
 		return result, fmt.Errorf("generation failed: %w", err)
 	}
@@ -174,95 +181,181 @@ func (g *Generator) Generate(opts models.EnhancedGenerateOptions, callback Progr
 	return result, nil
 }
 
-// generateFiles generates all files according to plan
+// fileTask is a unit of work for a worker goroutine.
+type fileTask struct {
+	index    int
+	fileType resolver.FileType
+	fileSize int64
+	format   string
+}
+
+// fileResult is the outcome of one file task.
+type fileResult struct {
+	filePath string
+	fileType resolver.FileType
+	bytes    int64
+	err      error
+}
+
+// generateFiles generates all files according to plan using a worker pool.
 func (g *Generator) generateFiles(
+	ctx context.Context,
 	opts models.EnhancedGenerateOptions,
 	plan *resolver.GenerationPlan,
 	monitor *GenerationMonitor,
 	callback ProgressCallback,
+	checkpoint func() error,
 	result *GenerationResult,
 ) error {
-	// Create generators
-	fillerGen := filler.New(g.seed)
-	piiGen := pii.New(true)
-	
-	// Generate each file
-	for i := 0; i < plan.Plan.FileCount; i++ {
-		// Check disk space periodically
-		if err := monitor.CheckDiskSpace(); err != nil {
-			return fmt.Errorf("disk space emergency: %w", err)
+	workers := opts.Workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+
+	tasks   := make(chan fileTask, workers*2)
+	results := make(chan fileResult, workers*2)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		// Each worker gets its own generators to avoid shared-state races.
+		go func(workerSeed int64) {
+			defer wg.Done()
+			fillerGen := filler.New(workerSeed)
+			piiGen    := pii.New(true)
+
+			for task := range tasks {
+				// Pause / cancel check between files
+				if checkpoint != nil {
+					if err := checkpoint(); err != nil {
+						select {
+						case results <- fileResult{err: err}:
+						case <-ctx.Done():
+						}
+						return
+					}
+				}
+
+				// Disk-space guard
+				if err := monitor.CheckDiskSpace(); err != nil {
+					select {
+					case results <- fileResult{err: fmt.Errorf("disk space emergency: %w", err)}:
+					case <-ctx.Done():
+					}
+					return
+				}
+
+				filePath := g.generateFilePath(opts.OutputPath, task.fileType, task.format, task.index, plan.Plan.DirectoryDepth)
+				if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+					select {
+					case results <- fileResult{err: fmt.Errorf("mkdir: %w", err)}:
+					case <-ctx.Done():
+					}
+					continue
+				}
+
+				var genErr error
+				switch task.fileType {
+				case resolver.FileTypePII:
+					genErr = g.generatePIIFile(filePath, task.format, task.fileSize, plan.PIIType, piiGen)
+				case resolver.FileTypeFiller:
+					genErr = fillerGen.GenerateToSize(filePath, task.format, task.fileSize)
+				}
+				if genErr != nil {
+					select {
+					case results <- fileResult{err: fmt.Errorf("generate %s: %w", filePath, genErr)}:
+					case <-ctx.Done():
+					}
+					continue
+				}
+
+				info, _ := os.Stat(filePath)
+				var written int64
+				if info != nil {
+					written = info.Size()
+				}
+
+				select {
+				case results <- fileResult{filePath: filePath, fileType: task.fileType, bytes: written}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(g.seed + int64(w))
+	}
+
+	// Close results once all workers finish.
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Feed tasks; stop early on context cancellation.
+	go func() {
+		defer close(tasks)
+		for i := 0; i < plan.Plan.FileCount; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case tasks <- fileTask{
+				index:    i,
+				fileType: plan.FileTypes[i],
+				fileSize: plan.FileSizes[i],
+				format:   plan.Formats[i%len(plan.Formats)],
+			}:
+			}
 		}
-		
-		// Get file specs
-		fileType := plan.FileTypes[i]
-		fileSize := plan.FileSizes[i]
-		format := plan.Formats[i%len(plan.Formats)] // Cycle through formats
-		
-		// Generate file path
-		filePath := g.generateFilePath(opts.OutputPath, fileType, format, i, plan.Plan.DirectoryDepth)
-		
-		// Create parent directory
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("create directory: %w", err))
+	}()
+
+	// Collect results and report progress.
+	var cancelled bool
+	for res := range results {
+		if res.err != nil {
+			if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
+				cancelled = true
+				continue // keep draining so workers are unblocked
+			}
+			result.Errors = append(result.Errors, res.err)
 			continue
-		}
-		
-		// Generate file based on type
-		var err error
-		switch fileType {
-		case resolver.FileTypePII:
-			err = g.generatePIIFile(filePath, format, fileSize, plan.PIIType, piiGen)
-		case resolver.FileTypeFiller:
-			err = fillerGen.GenerateToSize(filePath, format, fileSize)
-		}
-		
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("generate %s: %w", filePath, err))
-			continue
-		}
-		
-		// Track file size
-		info, _ := os.Stat(filePath)
-		if info != nil {
-			result.BytesWritten += info.Size()
 		}
 
-		// Register file in DB if a scenario ID was provided
+		// Track in DB if a scenario ID was provided.
 		if opts.ScenarioID != "" {
 			dataType := opts.Distribution.PIIType
-			if fileType == resolver.FileTypeFiller {
+			if res.fileType == resolver.FileTypeFiller {
 				dataType = "filler"
 			}
-			if trackErr := g.tracker.TrackFile(opts.ScenarioID, filePath, dataType); trackErr != nil {
-				result.Errors = append(result.Errors, fmt.Errorf("track %s: %w", filePath, trackErr))
+			if trackErr := g.tracker.TrackFile(opts.ScenarioID, res.filePath, dataType); trackErr != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("track %s: %w", res.filePath, trackErr))
 			}
 		}
 
+		result.BytesWritten += res.bytes
 		result.FilesCreated++
-		
-		// Report progress
+
 		if callback != nil {
 			elapsed := time.Since(monitor.StartTime)
-			percentComplete := float64(i+1) / float64(plan.Plan.FileCount) * 100
-			
-			var estimatedTotal time.Duration
-			if percentComplete > 0 {
-				estimatedTotal = time.Duration(float64(elapsed) / percentComplete * 100)
+			pct := float64(result.FilesCreated) / float64(plan.Plan.FileCount) * 100
+			var eta time.Duration
+			if pct > 0 {
+				eta = time.Duration(float64(elapsed) / pct * 100)
 			}
-			
 			callback(Progress{
-				Current:       i + 1,
+				Current:       result.FilesCreated,
 				Total:         plan.Plan.FileCount,
-				Percent:       percentComplete,
-				CurrentFile:   filepath.Base(filePath),
+				Percent:       pct,
+				CurrentFile:   filepath.Base(res.filePath),
 				BytesWritten:  result.BytesWritten,
 				ElapsedTime:   elapsed,
-				EstimatedTime: estimatedTotal,
+				EstimatedTime: eta,
 				Status:        "generating",
 			})
 		}
 	}
-	
+
+	if cancelled {
+		return context.Canceled
+	}
 	return nil
 }
 

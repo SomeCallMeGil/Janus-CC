@@ -101,6 +101,11 @@ func (s *Server) setupRoutes() {
 				r.Post("/generate", h.GenerateFiles)
 				r.Post("/encrypt", h.EncryptFiles)
 				r.Post("/destroy", h.DestroyScenario)
+
+				// Generation job control
+				r.Post("/generation/pause", h.PauseGeneration)
+				r.Post("/generation/resume", h.ResumeGeneration)
+				r.Post("/generation/cancel", h.CancelGeneration)
 				
 				// Files
 				r.Get("/files", h.ListFiles)

@@ -2,6 +2,7 @@
 package enhanced
 
 import (
+	"context"
 	"fmt"
 
 	"janus/internal/core/generator/models"
@@ -36,6 +37,7 @@ type QuickGenerateOptions struct {
 	// Optional
 	DirectoryDepth int   `json:"directory_depth"` // default: 3
 	Seed           int64 `json:"seed"`            // for reproducible generation (0 = random)
+	Workers        int   `json:"workers"`         // parallel file writers (0 = runtime.NumCPU)
 }
 
 // ToEnhancedOptions converts QuickGenerateOptions to EnhancedGenerateOptions
@@ -46,6 +48,7 @@ func (q *QuickGenerateOptions) ToEnhancedOptions() (models.EnhancedGenerateOptio
 		OutputPath:   q.OutputPath,
 		Formats:      q.Formats,
 		Seed:         q.Seed,
+		Workers:      q.Workers,
 		Distribution: models.ContentDistribution{
 			PIIPercent:    q.PIIPercent,
 			PIIType:       q.PIIType,
@@ -95,19 +98,21 @@ func (q *QuickGenerateOptions) ToEnhancedOptions() (models.EnhancedGenerateOptio
 	return opts, nil
 }
 
-// QuickGenerate provides a simplified generation interface
-func QuickGenerate(db dbmodels.Database, opts QuickGenerateOptions, callback ProgressCallback) (*GenerationResult, error) {
-	// Convert to enhanced options
+// QuickGenerate provides a simplified generation interface.
+// ctx and checkpoint control cancellation and pause respectively; pass nil for both
+// if no job control is needed.
+func QuickGenerate(ctx context.Context, db dbmodels.Database, opts QuickGenerateOptions, callback ProgressCallback, checkpoint func() error) (*GenerationResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	enhancedOpts, err := opts.ToEnhancedOptions()
 	if err != nil {
 		return nil, fmt.Errorf("invalid options: %w", err)
 	}
-	
-	// Create generator
+
 	gen := New(db, opts.Seed)
-	
-	// Generate
-	return gen.Generate(enhancedOpts, callback)
+	return gen.Generate(ctx, enhancedOpts, callback, checkpoint)
 }
 
 // Validate pre-validates options without generating
