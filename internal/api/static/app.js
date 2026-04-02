@@ -525,10 +525,15 @@ function handleEvent(ev) {
       break;
 
     case 'enhanced_generation_progress':
-      updateProgressModal(ev);
-      // Only log every 5% to avoid flooding
-      if (Math.round(ev.percent || 0) % 5 === 0) {
-        addLog('info', `[${sid}] ${(ev.percent||0).toFixed(1)}%  ${(ev.current||0).toLocaleString()}/${(ev.total||0).toLocaleString()} files`);
+      if (ev.status === 'info' || ev.status === 'warning') {
+        // Plan summary, disk info, or low-disk warnings — log them, don't update progress bar
+        if (ev.message) addLog(ev.status === 'warning' ? 'warn' : 'info', `[${sid}] ${ev.message}`);
+      } else {
+        updateProgressModal(ev);
+        // Only log every 5% to avoid flooding
+        if (Math.round(ev.percent || 0) % 5 === 0) {
+          addLog('info', `[${sid}] ${(ev.percent||0).toFixed(1)}%  ${(ev.current||0).toLocaleString()}/${(ev.total||0).toLocaleString()} files`);
+        }
       }
       break;
 

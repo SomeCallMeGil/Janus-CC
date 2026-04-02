@@ -346,6 +346,36 @@ func (s *SQLiteDB) BatchCreateFiles(files []*models.File) error {
 	return tx.Commit()
 }
 
+// BatchUpdateFileStatus updates encryption_status and encrypted_at for multiple files
+// in a single transaction. Avoids the per-file GET+UPDATE round-trip pattern.
+func (s *SQLiteDB) BatchUpdateFileStatus(updates []models.FileStatusUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	stmt, err := tx.Prepare(`
+		UPDATE files SET encryption_status = ?, encrypted_at = ? WHERE id = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, u := range updates {
+		if _, err := stmt.Exec(u.Status, u.EncryptedAt, u.FileID); err != nil {
+			return fmt.Errorf("update file %d: %w", u.FileID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
 // GetFile retrieves a file by ID
 func (s *SQLiteDB) GetFile(id int64) (*models.File, error) {
 	query := `

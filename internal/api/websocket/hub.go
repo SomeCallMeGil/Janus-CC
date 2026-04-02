@@ -3,9 +3,10 @@ package websocket
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/gorilla/websocket"
 )
@@ -63,13 +64,13 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			log.Printf("WebSocket client connected (total: %d)", len(h.clients))
+			log.Info().Int("clients", len(h.clients)).Msg("WebSocket client connected")
 
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
-				log.Printf("WebSocket client disconnected (total: %d)", len(h.clients))
+				log.Info().Int("clients", len(h.clients)).Msg("WebSocket client disconnected")
 			}
 
 		case message := <-h.broadcast:
@@ -89,14 +90,14 @@ func (h *Hub) Run() {
 func (h *Hub) Broadcast(message interface{}) {
 	data, err := json.Marshal(message)
 	if err != nil {
-		log.Printf("Error marshaling message: %v", err)
+		log.Error().Err(err).Msg("marshal broadcast message")
 		return
 	}
-	
+
 	select {
 	case h.broadcast <- data:
 	default:
-		log.Println("Broadcast channel full, dropping message")
+		log.Warn().Msg("broadcast channel full, dropping message")
 	}
 }
 
@@ -118,7 +119,7 @@ func (c *Client) readPump() {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
+				log.Warn().Err(err).Msg("WebSocket unexpected close")
 			}
 			break
 		}
@@ -173,7 +174,7 @@ func (c *Client) writePump() {
 func ServeWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		log.Error().Err(err).Msg("WebSocket upgrade failed")
 		return
 	}
 

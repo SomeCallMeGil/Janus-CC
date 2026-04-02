@@ -14,6 +14,46 @@ import (
 	"janus/internal/database/models"
 )
 
+// WriteCSV writes the file manifest for scenarioID as CSV to w.
+// Callers are responsible for setting Content-Type and Content-Disposition headers.
+func (t *Tracker) WriteCSV(scenarioID string, w io.Writer) error {
+	files, err := t.db.ListFilesByScenario(scenarioID, models.FileFilters{})
+	if err != nil {
+		return fmt.Errorf("list files: %w", err)
+	}
+
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+
+	header := []string{"ID", "Path", "SHA256", "Size", "Extension", "DataType", "EncryptionStatus", "CreatedAt", "EncryptedAt"}
+	if err := cw.Write(header); err != nil {
+		return fmt.Errorf("write header: %w", err)
+	}
+
+	for _, file := range files {
+		encryptedAt := ""
+		if file.EncryptedAt != nil {
+			encryptedAt = file.EncryptedAt.Format(time.RFC3339)
+		}
+		row := []string{
+			fmt.Sprintf("%d", file.ID),
+			file.Path,
+			file.SHA256,
+			fmt.Sprintf("%d", file.Size),
+			file.Extension,
+			file.DataType,
+			string(file.EncryptionStatus),
+			file.CreatedAt.Format(time.RFC3339),
+			encryptedAt,
+		}
+		if err := cw.Write(row); err != nil {
+			return fmt.Errorf("write row: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // Tracker handles file tracking and hashing
 type Tracker struct {
 	db models.Database
@@ -69,31 +109,6 @@ func (t *Tracker) HashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// TrackDirectory recursively tracks all files in a directory
-func (t *Tracker) TrackDirectory(scenarioID, root string, dataType string) (int, error) {
-	count := 0
-
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip directories
-		if info.IsDir() {
-			return nil
-		}
-
-		// Track file
-		if err := t.TrackFile(scenarioID, path, dataType); err != nil {
-			return fmt.Errorf("track %s: %w", path, err)
-		}
-
-		count++
-		return nil
-	})
-
-	return count, err
-}
 
 // VerifyIntegrity verifies the integrity of tracked files
 func (t *Tracker) VerifyIntegrity(scenarioID string) ([]string, error) {
@@ -229,51 +244,6 @@ func (t *Tracker) GetStatistics(scenarioID string) (*models.ScenarioStats, error
 	return t.db.GetScenarioStats(scenarioID)
 }
 
-// ProgressCallback is called during bulk operations to report progress
-type ProgressCallback func(current, total int, file string)
-
-// TrackDirectoryWithProgress tracks directory with progress reporting
-func (t *Tracker) TrackDirectoryWithProgress(scenarioID, root string, dataType string, callback ProgressCallback) (int, error) {
-	// First, count total files
-	var totalFiles int
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			totalFiles++
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	// Now track with progress
-	current := 0
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		current++
-		if callback != nil {
-			callback(current, totalFiles, path)
-		}
-
-		if err := t.TrackFile(scenarioID, path, dataType); err != nil {
-			return fmt.Errorf("track %s: %w", path, err)
-		}
-
-		return nil
-	})
-
-	return current, err
-}
 
 // FileManifest represents the complete manifest for a scenario
 type FileManifest struct {
@@ -336,12 +306,3 @@ func (t *Tracker) GenerateManifest(scenarioID string) (*FileManifest, error) {
 	return manifest, nil
 }
 
-// BulkUpdateStatus updates status for multiple files
-func (t *Tracker) BulkUpdateStatus(fileIDs []int64, status models.FileStatus) error {
-	for _, id := range fileIDs {
-		if err := t.UpdateFileStatus(id, status); err != nil {
-			return fmt.Errorf("update file %d: %w", id, err)
-		}
-	}
-	return nil
-}

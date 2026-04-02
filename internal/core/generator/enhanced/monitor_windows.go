@@ -18,60 +18,61 @@ var (
 	getDiskFreeSpaceEx = kernel32.NewProc("GetDiskFreeSpaceExW")
 )
 
-// CheckDiskSpace checks if we still have enough disk space (Windows implementation)
-func (m *GenerationMonitor) CheckDiskSpace() error {
+// CheckDiskSpace checks if we still have enough disk space (Windows implementation).
+// Returns a non-empty warning string when space is low but not yet critical.
+func (m *GenerationMonitor) CheckDiskSpace() (warning string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Only check periodically (expensive operation)
 	if time.Since(m.LastDiskCheck) < m.DiskCheckInterval {
-		return nil
+		return "", nil
 	}
-	
+
 	// Get the drive root (e.g., C:\)
-	absPath, err := filepath.Abs(m.OutputPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %w", err)
+	absPath, absErr := filepath.Abs(m.OutputPath)
+	if absErr != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", absErr)
 	}
-	
+
 	vol := filepath.VolumeName(absPath)
 	if vol == "" {
 		vol = absPath
 	}
-	
+
 	// Call Windows API to get disk space
 	var freeBytesAvailable, totalBytes, totalFreeBytes int64
-	
-	volumePtr, err := syscall.UTF16PtrFromString(vol + "\\")
-	if err != nil {
-		return fmt.Errorf("failed to convert path: %w", err)
+
+	volumePtr, ptrErr := syscall.UTF16PtrFromString(vol + "\\")
+	if ptrErr != nil {
+		return "", fmt.Errorf("failed to convert path: %w", ptrErr)
 	}
-	
-	ret, _, err := getDiskFreeSpaceEx.Call(
+
+	ret, _, callErr := getDiskFreeSpaceEx.Call(
 		uintptr(unsafe.Pointer(volumePtr)),
 		uintptr(unsafe.Pointer(&freeBytesAvailable)),
 		uintptr(unsafe.Pointer(&totalBytes)),
 		uintptr(unsafe.Pointer(&totalFreeBytes)),
 	)
-	
+
 	if ret == 0 {
-		return fmt.Errorf("disk check failed: %w", err)
+		return "", fmt.Errorf("disk check failed: %w", callErr)
 	}
-	
+
 	freeSpace := freeBytesAvailable
-	
+
 	// EMERGENCY: Less than safety margin remaining
 	if freeSpace < m.SafetyMargin {
-		return fmt.Errorf("CRITICAL: Only %s free space remaining (need %s safety margin)",
+		return "", fmt.Errorf("CRITICAL: Only %s free space remaining (need %s safety margin)",
 			models.FormatBytes(freeSpace),
 			models.FormatBytes(m.SafetyMargin))
 	}
-	
+
 	// WARNING: Getting close (less than 2x safety margin)
 	if freeSpace < m.SafetyMargin*2 {
-		fmt.Printf("⚠️ WARNING: Disk space getting low (%s remaining)\n", models.FormatBytes(freeSpace))
+		warning = fmt.Sprintf("Disk space getting low (%s remaining)", models.FormatBytes(freeSpace))
 	}
-	
+
 	m.LastDiskCheck = time.Now()
-	return nil
+	return warning, nil
 }

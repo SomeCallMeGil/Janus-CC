@@ -11,36 +11,37 @@ import (
 	"janus/internal/core/generator/models"
 )
 
-// CheckDiskSpace checks if we still have enough disk space (Unix/Linux/Mac implementation)
-func (m *GenerationMonitor) CheckDiskSpace() error {
+// CheckDiskSpace checks if we still have enough disk space (Unix/Linux/Mac implementation).
+// Returns a non-empty warning string when space is low but not yet critical.
+func (m *GenerationMonitor) CheckDiskSpace() (warning string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	// Only check periodically (expensive operation)
 	if time.Since(m.LastDiskCheck) < m.DiskCheckInterval {
-		return nil
+		return "", nil
 	}
-	
+
 	// Get current disk stats
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs(m.OutputPath, &stat); err != nil {
-		return fmt.Errorf("disk check failed: %w", err)
+	if statErr := syscall.Statfs(m.OutputPath, &stat); statErr != nil {
+		return "", fmt.Errorf("disk check failed: %w", statErr)
 	}
-	
+
 	freeSpace := int64(stat.Bavail) * int64(stat.Bsize)
-	
+
 	// EMERGENCY: Less than safety margin remaining
 	if freeSpace < m.SafetyMargin {
-		return fmt.Errorf("CRITICAL: Only %s free space remaining (need %s safety margin)",
+		return "", fmt.Errorf("CRITICAL: Only %s free space remaining (need %s safety margin)",
 			models.FormatBytes(freeSpace),
 			models.FormatBytes(m.SafetyMargin))
 	}
-	
+
 	// WARNING: Getting close (less than 2x safety margin)
 	if freeSpace < m.SafetyMargin*2 {
-		fmt.Printf("⚠️ WARNING: Disk space getting low (%s remaining)\n", models.FormatBytes(freeSpace))
+		warning = fmt.Sprintf("Disk space getting low (%s remaining)", models.FormatBytes(freeSpace))
 	}
-	
+
 	m.LastDiskCheck = time.Now()
-	return nil
+	return warning, nil
 }

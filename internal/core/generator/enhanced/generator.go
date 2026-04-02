@@ -21,16 +21,14 @@ import (
 	"janus/internal/core/generator/pii"
 	"janus/internal/core/generator/resolver"
 	"janus/internal/core/generator/validator"
-	"janus/internal/core/tracker"
 	dbmodels "janus/internal/database/models"
 )
 
 // Generator orchestrates enhanced file generation
 type Generator struct {
-	db           dbmodels.Database
-	validator    *validator.Validator
-	tracker      *tracker.Tracker
-	seed         int64
+	db        dbmodels.Database
+	validator *validator.Validator
+	seed      int64
 }
 
 // New creates a new enhanced generator
@@ -38,7 +36,6 @@ func New(db dbmodels.Database, seed int64) *Generator {
 	return &Generator{
 		db:        db,
 		validator: validator.New(),
-		tracker:   tracker.New(db),
 		seed:      seed,
 	}
 }
@@ -52,7 +49,8 @@ type Progress struct {
 	BytesWritten  int64   // Total bytes written so far
 	ElapsedTime   time.Duration
 	EstimatedTime time.Duration
-	Status        string  // "validating", "planning", "generating", "complete", "error"
+	Status        string  // "validating", "planning", "generating", "complete", "error", "warning", "info"
+	Message       string  // Human-readable detail — plan summary, warnings, disk info
 }
 
 // ProgressCallback is called during generation to report progress
@@ -98,46 +96,46 @@ func (g *Generator) Generate(ctx context.Context, opts models.EnhancedGenerateOp
 		return nil, fmt.Errorf("disk space validation failed:\n%s", diskValidation.ErrorMessages())
 	}
 	
-	// Log warnings if any
-	if len(validation.Warnings) > 0 || len(diskValidation.Warnings) > 0 {
-		fmt.Println("⚠️ Warnings:")
-		if len(validation.Warnings) > 0 {
-			fmt.Println(validation.WarningMessages())
+	// Surface validation warnings through the callback.
+	if callback != nil {
+		var warns []string
+		warns = append(warns, validation.WarningMessages())
+		warns = append(warns, diskValidation.WarningMessages())
+		for _, w := range warns {
+			if w != "" {
+				callback(Progress{Status: "warning", Message: w})
+			}
 		}
-		if len(diskValidation.Warnings) > 0 {
-			fmt.Println(diskValidation.WarningMessages())
-		}
-		fmt.Println()
 	}
-	
+
 	// Report planning phase
 	if callback != nil {
 		callback(Progress{Status: "planning"})
 	}
-	
+
 	// Step 3: Resolve constraints into concrete plan
 	res := resolver.New(opts.Seed)
 	plan, err := res.CreateGenerationPlan(opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create generation plan: %w", err)
 	}
-	
-	// Print plan summary
-	fmt.Println("📋 Generation Plan:")
-	fmt.Println(plan.Summary())
-	fmt.Println()
-	
-	if diskInfo != nil {
-		fmt.Printf("💾 Disk Space:\n")
-		fmt.Printf("  Available: %s (after %s safety margin)\n", 
-			models.FormatBytes(diskInfo.Available),
-			models.FormatBytes(diskInfo.SafetyMargin))
-		fmt.Printf("  Will use: %s (%.1f%% of available)\n",
-			models.FormatBytes(diskInfo.RequiredSpace),
-			float64(diskInfo.RequiredSpace)/float64(diskInfo.Available)*100)
-		fmt.Printf("  Remaining: %s\n", 
-			models.FormatBytes(diskInfo.Available-diskInfo.RequiredSpace))
-		fmt.Println()
+
+	// Surface plan summary and disk info through the callback.
+	if callback != nil {
+		callback(Progress{Status: "info", Message: plan.Summary()})
+		if diskInfo != nil {
+			callback(Progress{
+				Status: "info",
+				Message: fmt.Sprintf(
+					"Disk space — available: %s (after %s margin) | will use: %s (%.1f%%) | remaining: %s",
+					models.FormatBytes(diskInfo.Available),
+					models.FormatBytes(diskInfo.SafetyMargin),
+					models.FormatBytes(diskInfo.RequiredSpace),
+					float64(diskInfo.RequiredSpace)/float64(diskInfo.Available)*100,
+					models.FormatBytes(diskInfo.Available-diskInfo.RequiredSpace),
+				),
+			})
+		}
 	}
 	
 	// Step 4: Create output directory
@@ -240,12 +238,14 @@ func (g *Generator) generateFiles(
 				}
 
 				// Disk-space guard
-				if err := monitor.CheckDiskSpace(); err != nil {
+				if diskWarn, diskErr := monitor.CheckDiskSpace(); diskErr != nil {
 					select {
-					case results <- fileResult{err: fmt.Errorf("disk space emergency: %w", err)}:
+					case results <- fileResult{err: fmt.Errorf("disk space emergency: %w", diskErr)}:
 					case <-ctx.Done():
 					}
 					return
+				} else if diskWarn != "" && callback != nil {
+					callback(Progress{Status: "warning", Message: diskWarn})
 				}
 
 				filePath := g.generateFilePath(opts.OutputPath, task.fileType, task.format, task.index, plan.Plan.DirectoryDepth)

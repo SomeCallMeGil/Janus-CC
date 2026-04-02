@@ -25,6 +25,7 @@ type Database interface {
 	// Files
 	CreateFile(f *File) error
 	BatchCreateFiles(files []*File) error
+	BatchUpdateFileStatus(updates []FileStatusUpdate) error
 	GetFile(id int64) (*File, error)
 	ListFilesByScenario(scenarioID string, filters FileFilters) ([]*File, error)
 	UpdateFile(f *File) error
@@ -96,6 +97,13 @@ const (
 	FileStatusEncrypted FileStatus = "encrypted"
 	FileStatusFailed    FileStatus = "failed"
 )
+
+// FileStatusUpdate carries the fields needed for a batch status update.
+type FileStatusUpdate struct {
+	FileID      int64
+	Status      FileStatus
+	EncryptedAt *time.Time // set when Status == FileStatusEncrypted
+}
 
 // FileFilters for querying files
 type FileFilters struct {

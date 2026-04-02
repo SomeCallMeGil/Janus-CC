@@ -4,11 +4,13 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"janus/internal/api"
 	"janus/internal/config"
@@ -29,7 +31,7 @@ func main() {
 	if *configPath != "" {
 		cfg, err = config.Load(*configPath)
 		if err != nil {
-			log.Fatalf("Failed to load config: %v", err)
+			log.Fatal().Err(err).Msg("load config")
 		}
 	} else {
 		// Use defaults
@@ -52,28 +54,38 @@ func main() {
 		}
 	}
 
-	log.Printf("Starting Janus Server v3.0")
-	log.Printf("Mode: %s", cfg.Mode)
+	// Configure zerolog from loaded config
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	level, err := zerolog.ParseLevel(cfg.Logging.Level)
+	if err != nil || level == zerolog.NoLevel {
+		level = zerolog.InfoLevel
+	}
+	zerolog.SetGlobalLevel(level)
+	if cfg.Logging.Format != "json" {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	}
+
+	log.Info().Str("mode", string(cfg.Mode)).Msg("starting Janus Server v3.0")
 
 	// Initialize database
 	db, err := sqlite.New(cfg.Database.Path)
 	if err != nil {
-		log.Fatalf("Failed to create database: %v", err)
+		log.Fatal().Err(err).Msg("create database")
 	}
 
 	if err := db.Connect(); err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		log.Fatal().Err(err).Msg("connect to database")
 	}
 	defer db.Close()
 
-	log.Printf("Database: %s", cfg.Database.Path)
+	log.Info().Str("path", cfg.Database.Path).Msg("database connected")
 
 	// Run migrations
 	if err := db.Migrate(); err != nil {
-		log.Fatalf("Failed to migrate database: %v", err)
+		log.Fatal().Err(err).Msg("migrate database")
 	}
 
-	log.Println("Database migrations completed")
+	log.Info().Msg("database migrations completed")
 
 	// Create and start API server
 	server := api.New(cfg, db)
@@ -84,21 +96,21 @@ func main() {
 		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
 		<-sigint
 
-		log.Println("Received shutdown signal")
+		log.Info().Msg("received shutdown signal")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if err := server.Stop(ctx); err != nil {
-			log.Printf("Server shutdown error: %v", err)
+			log.Error().Err(err).Msg("server shutdown error")
 		}
 
 		os.Exit(0)
 	}()
 
 	// Start server
-	log.Println("Server starting...")
+	log.Info().Msg("server starting")
 	if err := server.Start(); err != nil {
-		log.Fatalf("Server error: %v", err)
+		log.Fatal().Err(err).Msg("server error")
 	}
 }

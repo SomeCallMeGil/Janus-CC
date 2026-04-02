@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"janus/internal/api/jobs"
 	"janus/internal/api/websocket"
@@ -403,7 +405,15 @@ func (h *Handlers) DestroyScenario(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if root != "" {
-			os.RemoveAll(root)
+			if err := os.RemoveAll(root); err != nil {
+				log.Error().Err(err).Str("scenario_id", id).Str("root", root).Msg("destroy scenario: remove tree")
+				h.hub.Broadcast(map[string]interface{}{
+					"type":        "destroy_warning",
+					"scenario_id": id,
+					"message":     fmt.Sprintf("directory removal failed: %v", err),
+					"time":        time.Now().UTC(),
+				})
+			}
 		}
 
 		// Mark scenario status as destroyed
@@ -442,8 +452,9 @@ func (h *Handlers) ListFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if limitStr != "" {
-		limit, _ := strconv.Atoi(limitStr)
-		filters.Limit = limit
+		if n, err := strconv.Atoi(limitStr); err == nil {
+			filters.Limit = n
+		}
 	}
 
 	files, err := h.db.ListFilesByScenario(id, filters)
@@ -471,23 +482,17 @@ func (h *Handlers) GetManifest(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, manifest)
 }
 
-// ExportCSV exports manifest to CSV
+// ExportCSV streams the file manifest as CSV directly to the response — no temp file.
 func (h *Handlers) ExportCSV(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	// Create temp file in OS temp dir (cross-platform)
-	tmpFile := fmt.Sprintf("%s/manifest-%s-%d.csv", os.TempDir(), id, time.Now().Unix())
-
-	if err := h.tracker.ExportCSV(id, tmpFile); err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Set headers for download
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=manifest-%s.csv", id))
 
-	http.ServeFile(w, r, tmpFile)
+	if err := h.tracker.WriteCSV(id, w); err != nil {
+		// Headers already sent — can't send a JSON error, log it instead.
+		log.Error().Err(err).Str("scenario_id", id).Msg("export CSV")
+	}
 }
 
 // ListJobs lists jobs
@@ -537,7 +542,11 @@ func (h *Handlers) CreateJob(w http.ResponseWriter, r *http.Request) {
 // GetJob gets a job by ID
 func (h *Handlers) GetJob(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	id, _ := strconv.ParseInt(idStr, 10, 64)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
 
 	job, err := h.scheduler.GetJob(id)
 	if err != nil {
@@ -551,7 +560,11 @@ func (h *Handlers) GetJob(w http.ResponseWriter, r *http.Request) {
 // CancelJob cancels a job
 func (h *Handlers) CancelJob(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	id, _ := strconv.ParseInt(idStr, 10, 64)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
 
 	if err := h.scheduler.CancelJob(id); err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -564,7 +577,11 @@ func (h *Handlers) CancelJob(w http.ResponseWriter, r *http.Request) {
 // GetJobProgress gets job progress
 func (h *Handlers) GetJobProgress(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
-	id, _ := strconv.ParseInt(idStr, 10, 64)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
 
 	progress, err := h.scheduler.GetJobProgress(id)
 	if err != nil {
@@ -575,34 +592,26 @@ func (h *Handlers) GetJobProgress(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, progress)
 }
 
-// EnhancedGenerate runs enhanced generation from a QuickGenerateOptions payload
-func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
-	var req enhanced.QuickGenerateOptions
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	// Create a scenario record directly so generated files are queryable via the standard APIs.
-	// We bypass scenarioManager.Create() to avoid legacy config validation that doesn't apply here.
-	// Store output_path in Generation.Root so DestroyScenario can clean up the directory tree.
+// runEnhancedGeneration creates a scenario record, registers job control, and starts the
+// generation goroutine. profileID is empty for direct (non-profile) generation.
+// Returns the scenario ID so the caller can include it in the HTTP response.
+func (h *Handlers) runEnhancedGeneration(opts enhanced.QuickGenerateOptions, descPrefix, profileID string) (string, error) {
 	scenarioRecord := &models.Scenario{
-		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
-		Name:        req.Name,
-		Description: fmt.Sprintf("Enhanced generation: %s", req.OutputPath),
+		ID:          uuid.New().String(),
+		Name:        opts.Name,
+		Description: fmt.Sprintf("%s: %s", descPrefix, opts.OutputPath),
 		Type:        "enhanced",
-		Config:      fmt.Sprintf(`{"generation":{"root":%q}}`, req.OutputPath),
+		Config:      fmt.Sprintf(`{"generation":{"root":%q}}`, opts.OutputPath),
 		Status:      "pending",
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
 	}
 	if err := h.db.CreateScenario(scenarioRecord); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("create scenario: %s", err))
-		return
+		return "", fmt.Errorf("create scenario: %w", err)
 	}
-	scenarioID := scenarioRecord.ID
 
-	req.ScenarioID = scenarioID
+	scenarioID := scenarioRecord.ID
+	opts.ScenarioID = scenarioID
 
 	ctrl := jobs.NewControl(context.Background())
 	h.jobRegistry.Register(scenarioID, ctrl)
@@ -610,26 +619,31 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer h.jobRegistry.Remove(scenarioID)
 
-		h.scenarioManager.UpdateStatus(scenarioID, "generating")
-		h.hub.Broadcast(map[string]interface{}{
+		startEvent := map[string]interface{}{
 			"type":        "enhanced_generation_started",
 			"scenario_id": scenarioID,
-			"name":        req.Name,
-			"workers":     req.Workers,
+			"name":        opts.Name,
+			"workers":     opts.Workers,
 			"time":        time.Now().UTC(),
-		})
+		}
+		if profileID != "" {
+			startEvent["profile_id"] = profileID
+		}
+		h.scenarioManager.UpdateStatus(scenarioID, "generating")
+		h.hub.Broadcast(startEvent)
 
-		result, err := enhanced.QuickGenerate(ctrl.Context(), h.db, req, func(p enhanced.Progress) {
+		result, err := enhanced.QuickGenerate(ctrl.Context(), h.db, opts, func(p enhanced.Progress) {
 			h.hub.Broadcast(map[string]interface{}{
 				"type":          "enhanced_generation_progress",
 				"scenario_id":   scenarioID,
-				"name":          req.Name,
+				"name":          opts.Name,
 				"current":       p.Current,
 				"total":         p.Total,
 				"percent":       p.Percent,
 				"current_file":  p.CurrentFile,
 				"bytes_written": p.BytesWritten,
 				"status":        p.Status,
+				"message":       p.Message,
 				"time":          time.Now().UTC(),
 			})
 		}, ctrl.CheckPoint)
@@ -643,7 +657,7 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 			h.hub.Broadcast(map[string]interface{}{
 				"type":        "enhanced_generation_failed",
 				"scenario_id": scenarioID,
-				"name":        req.Name,
+				"name":        opts.Name,
 				"error":       err.Error(),
 				"cancelled":   err == context.Canceled,
 				"time":        time.Now().UTC(),
@@ -655,13 +669,30 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 		h.hub.Broadcast(map[string]interface{}{
 			"type":          "enhanced_generation_completed",
 			"scenario_id":   scenarioID,
-			"name":          req.Name,
+			"name":          opts.Name,
 			"files_created": result.FilesCreated,
 			"bytes_written": result.BytesWritten,
 			"duration_ms":   result.Duration.Milliseconds(),
 			"time":          time.Now().UTC(),
 		})
 	}()
+
+	return scenarioID, nil
+}
+
+// EnhancedGenerate runs enhanced generation from a QuickGenerateOptions payload.
+func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
+	var req enhanced.QuickGenerateOptions
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	scenarioID, err := h.runEnhancedGeneration(req, "Enhanced generation", "")
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"message":     "Enhanced generation started",
@@ -674,7 +705,9 @@ func (h *Handlers) GetActivity(w http.ResponseWriter, r *http.Request) {
 	limitStr := r.URL.Query().Get("limit")
 	limit := 100
 	if limitStr != "" {
-		limit, _ = strconv.Atoi(limitStr)
+		if n, err := strconv.Atoi(limitStr); err == nil {
+			limit = n
+		}
 	}
 
 	filters := models.ActivityFilters{
@@ -859,84 +892,15 @@ func (h *Handlers) GenerateFromProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delegate to the same logic as EnhancedGenerate by re-encoding and calling internally.
-	// Store output_path in Generation.Root so DestroyScenario can clean up the directory tree.
-	scenarioRecord := &models.Scenario{
-		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
-		Name:        opts.Name,
-		Description: fmt.Sprintf("Profile generation: %s", opts.OutputPath),
-		Type:        "enhanced",
-		Config:      fmt.Sprintf(`{"generation":{"root":%q}}`, opts.OutputPath),
-		Status:      "pending",
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-	if err := h.db.CreateScenario(scenarioRecord); err != nil {
-		respondError(w, http.StatusInternalServerError, fmt.Sprintf("create scenario: %s", err))
+	scenarioID, err := h.runEnhancedGeneration(opts, "Profile generation", id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	opts.ScenarioID = scenarioRecord.ID
-
-	ctrl := jobs.NewControl(context.Background())
-	h.jobRegistry.Register(scenarioRecord.ID, ctrl)
-
-	go func() {
-		defer h.jobRegistry.Remove(scenarioRecord.ID)
-
-		h.scenarioManager.UpdateStatus(scenarioRecord.ID, "generating")
-		h.hub.Broadcast(map[string]interface{}{
-			"type":        "enhanced_generation_started",
-			"scenario_id": scenarioRecord.ID,
-			"name":        opts.Name,
-			"profile_id":  id,
-			"workers":     opts.Workers,
-			"time":        time.Now().UTC(),
-		})
-
-		result, err := enhanced.QuickGenerate(ctrl.Context(), h.db, opts, func(p enhanced.Progress) {
-			h.hub.Broadcast(map[string]interface{}{
-				"type":          "enhanced_generation_progress",
-				"scenario_id":   scenarioRecord.ID,
-				"current":       p.Current,
-				"total":         p.Total,
-				"percent":       p.Percent,
-				"current_file":  p.CurrentFile,
-				"bytes_written": p.BytesWritten,
-				"status":        p.Status,
-				"time":          time.Now().UTC(),
-			})
-		}, ctrl.CheckPoint)
-
-		if err != nil {
-			status := "failed"
-			if err == context.Canceled {
-				status = "cancelled"
-			}
-			h.scenarioManager.UpdateStatus(scenarioRecord.ID, status)
-			h.hub.Broadcast(map[string]interface{}{
-				"type":        "enhanced_generation_failed",
-				"scenario_id": scenarioRecord.ID,
-				"error":       err.Error(),
-				"cancelled":   err == context.Canceled,
-				"time":        time.Now().UTC(),
-			})
-			return
-		}
-
-		h.scenarioManager.UpdateStatus(scenarioRecord.ID, "ready")
-		h.hub.Broadcast(map[string]interface{}{
-			"type":          "enhanced_generation_completed",
-			"scenario_id":   scenarioRecord.ID,
-			"files_created": result.FilesCreated,
-			"bytes_written": result.BytesWritten,
-			"duration_ms":   result.Duration.Milliseconds(),
-			"time":          time.Now().UTC(),
-		})
-	}()
 
 	respondJSON(w, http.StatusAccepted, map[string]interface{}{
 		"message":     "Generation started",
-		"scenario_id": scenarioRecord.ID,
+		"scenario_id": scenarioID,
 		"profile_id":  id,
 	})
 }

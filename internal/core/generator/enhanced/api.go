@@ -136,17 +136,8 @@ func Validate(db dbmodels.Database, opts QuickGenerateOptions) error {
 		return fmt.Errorf("disk space validation failed:\n%s", diskValidation.ErrorMessages())
 	}
 	
-	// Print warnings
-	if len(validation.Warnings) > 0 || len(diskValidation.Warnings) > 0 {
-		fmt.Println("⚠️ Warnings:")
-		if len(validation.Warnings) > 0 {
-			fmt.Println(validation.WarningMessages())
-		}
-		if len(diskValidation.Warnings) > 0 {
-			fmt.Println(diskValidation.WarningMessages())
-		}
-	}
-	
+	// Warnings are non-fatal; callers can inspect them via the ValidationResult if needed.
+	// We don't print here — Validate is called from server context where stdout is not useful.
 	return nil
 }
 

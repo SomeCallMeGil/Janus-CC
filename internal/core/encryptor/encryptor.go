@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/pbkdf2"
 	"janus/internal/core/scheduler"
 	"janus/internal/core/tracker"
@@ -280,16 +281,23 @@ func (e *Encryptor) EncryptJob(jobID int64, opts *Options, progress ProgressCall
 	// Encrypt files concurrently
 	results := e.encryptConcurrent(fileIDs, opts, progress)
 	
-	// Update job with results
+	// Batch-update all file statuses in a single transaction instead of
+	// calling UpdateFileStatus (GET+UPDATE) per file.
 	successCount := 0
+	updates := make([]models.FileStatusUpdate, 0, len(results))
 	for _, result := range results {
+		u := models.FileStatusUpdate{FileID: result.FileID, Status: models.FileStatusFailed}
 		if result.Error == nil {
 			successCount++
-			// Update file status
-			e.tracker.UpdateFileStatus(result.FileID, models.FileStatusEncrypted)
-		} else {
-			e.tracker.UpdateFileStatus(result.FileID, models.FileStatusFailed)
+			now := time.Now()
+			u.Status = models.FileStatusEncrypted
+			u.EncryptedAt = &now
 		}
+		updates = append(updates, u)
+	}
+	if err := e.db.BatchUpdateFileStatus(updates); err != nil {
+		// Log but don't fail the job — encryption already happened on disk.
+		log.Warn().Err(err).Int64("job_id", jobID).Msg("batch status update failed")
 	}
 	
 	// Update job progress

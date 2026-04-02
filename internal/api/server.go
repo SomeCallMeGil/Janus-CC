@@ -6,9 +6,10 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -175,10 +176,10 @@ func (s *Server) Start() error {
 	// Start WebSocket hub
 	go s.hub.Run()
 
-	log.Printf("Starting server on %s", addr)
-	log.Printf("Web UI: http://localhost:%d", s.config.Server.Port)
-	log.Printf("API: http://localhost:%d/api/v1", s.config.Server.Port)
-	log.Printf("WebSocket: ws://localhost:%d/ws/v1/activity", s.config.Server.Port)
+	log.Info().Str("addr", addr).Msg("starting HTTP server")
+	log.Info().Str("url", fmt.Sprintf("http://localhost:%d", s.config.Server.Port)).Msg("web UI")
+	log.Info().Str("url", fmt.Sprintf("http://localhost:%d/api/v1", s.config.Server.Port)).Msg("API")
+	log.Info().Str("url", fmt.Sprintf("ws://localhost:%d/ws/v1/activity", s.config.Server.Port)).Msg("WebSocket")
 
 	if s.config.Server.TLS.Enabled {
 		return s.server.ListenAndServeTLS(
@@ -192,7 +193,7 @@ func (s *Server) Start() error {
 
 // Stop gracefully stops the server
 func (s *Server) Stop(ctx context.Context) error {
-	log.Println("Shutting down server...")
+	log.Info().Msg("shutting down server")
 	
 	if s.server != nil {
 		return s.server.Shutdown(ctx)
