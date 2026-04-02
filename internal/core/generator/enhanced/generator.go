@@ -3,10 +3,13 @@ package enhanced
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -190,10 +193,10 @@ type fileTask struct {
 }
 
 // fileResult is the outcome of one file task.
+// file is pre-built with hash+size so the result collector can batch-insert without re-reading.
 type fileResult struct {
-	filePath string
+	file     *dbmodels.File
 	fileType resolver.FileType
-	bytes    int64
 	err      error
 }
 
@@ -269,14 +272,38 @@ func (g *Generator) generateFiles(
 					continue
 				}
 
+				// Hash and stat in the worker — parallel I/O, keeps collector lean.
+				hash, hashErr := hashFile(filePath)
+				if hashErr != nil {
+					select {
+					case results <- fileResult{err: fmt.Errorf("hash %s: %w", filePath, hashErr)}:
+					case <-ctx.Done():
+					}
+					continue
+				}
 				info, _ := os.Stat(filePath)
-				var written int64
+				var size int64
 				if info != nil {
-					written = info.Size()
+					size = info.Size()
+				}
+
+				dataType := opts.Distribution.PIIType
+				if task.fileType == resolver.FileTypeFiller {
+					dataType = "filler"
+				}
+				f := &dbmodels.File{
+					ScenarioID:       opts.ScenarioID,
+					Path:             filePath,
+					SHA256:           hash,
+					Size:             size,
+					Extension:        filepath.Ext(filePath),
+					DataType:         dataType,
+					EncryptionStatus: dbmodels.FileStatusPending,
+					CreatedAt:        time.Now(),
 				}
 
 				select {
-				case results <- fileResult{filePath: filePath, fileType: task.fileType, bytes: written}:
+				case results <- fileResult{file: f, fileType: task.fileType}:
 				case <-ctx.Done():
 					return
 				}
@@ -307,31 +334,41 @@ func (g *Generator) generateFiles(
 		}
 	}()
 
-	// Collect results and report progress.
+	// Collect results, batch-insert into DB every batchSize records.
+	const batchSize = 50
+	batch := make([]*dbmodels.File, 0, batchSize)
+
+	flushBatch := func() {
+		if len(batch) == 0 || opts.ScenarioID == "" {
+			batch = batch[:0]
+			return
+		}
+		if err := g.db.BatchCreateFiles(batch); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("batch insert: %w", err))
+		}
+		batch = batch[:0]
+	}
+
 	var cancelled bool
 	for res := range results {
 		if res.err != nil {
 			if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
 				cancelled = true
-				continue // keep draining so workers are unblocked
+				continue // keep draining so workers exit cleanly
 			}
 			result.Errors = append(result.Errors, res.err)
 			continue
 		}
 
-		// Track in DB if a scenario ID was provided.
+		result.BytesWritten += res.file.Size
+		result.FilesCreated++
+
 		if opts.ScenarioID != "" {
-			dataType := opts.Distribution.PIIType
-			if res.fileType == resolver.FileTypeFiller {
-				dataType = "filler"
-			}
-			if trackErr := g.tracker.TrackFile(opts.ScenarioID, res.filePath, dataType); trackErr != nil {
-				result.Errors = append(result.Errors, fmt.Errorf("track %s: %w", res.filePath, trackErr))
+			batch = append(batch, res.file)
+			if len(batch) >= batchSize {
+				flushBatch()
 			}
 		}
-
-		result.BytesWritten += res.bytes
-		result.FilesCreated++
 
 		if callback != nil {
 			elapsed := time.Since(monitor.StartTime)
@@ -344,7 +381,7 @@ func (g *Generator) generateFiles(
 				Current:       result.FilesCreated,
 				Total:         plan.Plan.FileCount,
 				Percent:       pct,
-				CurrentFile:   filepath.Base(res.filePath),
+				CurrentFile:   filepath.Base(res.file.Path),
 				BytesWritten:  result.BytesWritten,
 				ElapsedTime:   elapsed,
 				EstimatedTime: eta,
@@ -353,10 +390,27 @@ func (g *Generator) generateFiles(
 		}
 	}
 
+	// Flush any remaining records that didn't fill a full batch.
+	flushBatch()
+
 	if cancelled {
 		return context.Canceled
 	}
 	return nil
+}
+
+// hashFile computes the SHA-256 hash of a file and returns the hex string.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // generateFilePath creates a file path with proper directory structure

@@ -24,6 +24,7 @@ type Database interface {
 
 	// Files
 	CreateFile(f *File) error
+	BatchCreateFiles(files []*File) error
 	GetFile(id int64) (*File, error)
 	ListFilesByScenario(scenarioID string, filters FileFilters) ([]*File, error)
 	UpdateFile(f *File) error

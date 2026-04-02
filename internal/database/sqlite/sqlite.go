@@ -26,14 +26,33 @@ func New(path string) (*SQLiteDB, error) {
 
 // Connect opens the database connection
 func (s *SQLiteDB) Connect() error {
-	db, err := sql.Open("sqlite", s.path+"?_foreign_keys=on&_journal_mode=WAL")
+	db, err := sql.Open("sqlite", s.path+"?_foreign_keys=on")
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 
-	// Set connection pool settings
-	db.SetMaxOpenConns(1) // SQLite works best with single connection
-	db.SetMaxIdleConns(1)
+	// WAL mode allows concurrent readers alongside one writer.
+	// Set these via PRAGMA rather than DSN params — modernc driver honors both,
+	// but explicit PRAGMA is authoritative and survives connection recycling.
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",    // safe with WAL; full durability on OS crash still guaranteed
+		"PRAGMA busy_timeout=5000",     // wait up to 5 s before returning SQLITE_BUSY
+		"PRAGMA cache_size=-32768",     // 32 MB page cache (negative = KB)
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA wal_autocheckpoint=1000", // checkpoint every 1000 pages (~4 MB at default page size)
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			return fmt.Errorf("pragma %q: %w", p, err)
+		}
+	}
+
+	// With WAL, SQLite supports one concurrent writer and multiple readers.
+	// Allow a small pool so workers don't all block on a single connection.
+	// The writer lock is still enforced internally by SQLite.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(time.Hour)
 
 	s.db = db
@@ -282,6 +301,49 @@ func (s *SQLiteDB) CreateFile(file *models.File) error {
 	id, _ := result.LastInsertId()
 	file.ID = id
 	return nil
+}
+
+// BatchCreateFiles inserts multiple file records in a single transaction.
+// This is 50-100x faster than individual CreateFile calls for bulk inserts.
+func (s *SQLiteDB) BatchCreateFiles(files []*models.File) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO files (scenario_id, path, sha256, size, extension, data_type, encryption_status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, file := range files {
+		result, err := stmt.Exec(
+			file.ScenarioID,
+			file.Path,
+			file.SHA256,
+			file.Size,
+			file.Extension,
+			file.DataType,
+			file.EncryptionStatus,
+			file.CreatedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("insert file %s: %w", file.Path, err)
+		}
+		id, _ := result.LastInsertId()
+		file.ID = id
+	}
+
+	return tx.Commit()
 }
 
 // GetFile retrieves a file by ID

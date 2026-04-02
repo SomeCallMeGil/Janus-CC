@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -383,9 +385,25 @@ func (h *Handlers) DestroyScenario(w http.ResponseWriter, r *http.Request) {
 			deleted++
 		}
 
-		// Remove the payload directory tree entirely (leaves no empty dirs behind)
-		if cfg, err := h.scenarioManager.GetConfig(id); err == nil && cfg.Generation.Root != "" {
-			os.RemoveAll(cfg.Generation.Root)
+		// Remove the payload directory tree entirely (leaves no empty dirs behind).
+		// For enhanced scenarios created before this fix (Config="{}"), fall back to
+		// deriving the root from the common ancestor of the tracked file paths.
+		root := ""
+		if cfg, err := h.scenarioManager.GetConfig(id); err == nil {
+			root = cfg.Generation.Root
+		}
+		if root == "" && len(files) > 0 {
+			// Walk up from the first file until we find a directory that is an
+			// ancestor of all tracked files — use the parent of the deepest common prefix.
+			root = filepath.Dir(files[0].Path)
+			for _, f := range files[1:] {
+				for !strings.HasPrefix(f.Path, root+string(os.PathSeparator)) && root != filepath.Dir(root) {
+					root = filepath.Dir(root)
+				}
+			}
+		}
+		if root != "" {
+			os.RemoveAll(root)
 		}
 
 		// Mark scenario status as destroyed
@@ -567,12 +585,13 @@ func (h *Handlers) EnhancedGenerate(w http.ResponseWriter, r *http.Request) {
 
 	// Create a scenario record directly so generated files are queryable via the standard APIs.
 	// We bypass scenarioManager.Create() to avoid legacy config validation that doesn't apply here.
+	// Store output_path in Generation.Root so DestroyScenario can clean up the directory tree.
 	scenarioRecord := &models.Scenario{
 		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
 		Name:        req.Name,
 		Description: fmt.Sprintf("Enhanced generation: %s", req.OutputPath),
 		Type:        "enhanced",
-		Config:      "{}",
+		Config:      fmt.Sprintf(`{"generation":{"root":%q}}`, req.OutputPath),
 		Status:      "pending",
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
@@ -840,13 +859,14 @@ func (h *Handlers) GenerateFromProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delegate to the same logic as EnhancedGenerate by re-encoding and calling internally
+	// Delegate to the same logic as EnhancedGenerate by re-encoding and calling internally.
+	// Store output_path in Generation.Root so DestroyScenario can clean up the directory tree.
 	scenarioRecord := &models.Scenario{
 		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
 		Name:        opts.Name,
 		Description: fmt.Sprintf("Profile generation: %s", opts.OutputPath),
 		Type:        "enhanced",
-		Config:      "{}",
+		Config:      fmt.Sprintf(`{"generation":{"root":%q}}`, opts.OutputPath),
 		Status:      "pending",
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
