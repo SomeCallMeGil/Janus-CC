@@ -14,7 +14,10 @@
       "Bash(where go:*)",
       "Read(//c//**)",
       "Read(//c/Go/**)",
-      "Bash(find /c -name go.exe -maxdepth 5)"
+      "Bash(find /c -name go.exe -maxdepth 5)",
+      "mcp__claude_ai_Notion__notion-search",
+      "mcp__claude_ai_Notion__notion-fetch",
+      "mcp__claude_ai_Notion__notion-update-page"
     ]
   }
 }
