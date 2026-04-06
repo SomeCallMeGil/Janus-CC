@@ -199,12 +199,29 @@ func main() {
 		RunE:  listProfiles,
 	}
 
-	profileGetCmd := &cobra.Command{
-		Use:   "get [id]",
-		Short: "Show profile details",
+	profileShowCmd := &cobra.Command{
+		Use:   "show [id]",
+		Short: "Show full profile details",
 		Args:  cobra.ExactArgs(1),
-		RunE:  getProfile,
+		RunE:  showProfile,
 	}
+
+	profileUpdateCmd := &cobra.Command{
+		Use:   "update [id]",
+		Short: "Update a profile",
+		Args:  cobra.ExactArgs(1),
+		RunE:  updateProfile,
+	}
+	profileUpdateCmd.Flags().String("name", "", "New profile name")
+	profileUpdateCmd.Flags().String("description", "", "New description")
+	profileUpdateCmd.Flags().String("total-size", "", "Total size (e.g. 5GB)")
+	profileUpdateCmd.Flags().Int("file-count", 0, "Number of files")
+	profileUpdateCmd.Flags().String("file-size-min", "", "Minimum file size")
+	profileUpdateCmd.Flags().String("file-size-max", "", "Maximum file size")
+	profileUpdateCmd.Flags().Float64("pii-percent", 0, "PII percentage (0-100)")
+	profileUpdateCmd.Flags().Float64("filler-percent", 0, "Filler percentage (0-100)")
+	profileUpdateCmd.Flags().String("pii-type", "", "PII type: standard, healthcare, financial")
+	profileUpdateCmd.Flags().String("output", "", "Output directory")
 
 	profileDeleteCmd := &cobra.Command{
 		Use:   "delete [id]",
@@ -215,7 +232,8 @@ func main() {
 
 	profileCmd.AddCommand(profileCreateCmd)
 	profileCmd.AddCommand(profileListCmd)
-	profileCmd.AddCommand(profileGetCmd)
+	profileCmd.AddCommand(profileShowCmd)
+	profileCmd.AddCommand(profileUpdateCmd)
 	profileCmd.AddCommand(profileDeleteCmd)
 
 	// gen profile <id> [--watch]
@@ -285,6 +303,31 @@ func apiPost(path string, data interface{}) ([]byte, error) {
 		return nil, fmt.Errorf("API error: %s", string(body))
 	}
 
+	return body, nil
+}
+
+func apiPut(path string, data interface{}) ([]byte, error) {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPut, apiURL+path, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("API error: %s", string(body))
+	}
 	return body, nil
 }
 
@@ -867,10 +910,11 @@ func listProfiles(cmd *cobra.Command, args []string) error {
 			Name        string `json:"name"`
 			Description string `json:"description"`
 			Options     struct {
-				TotalSize  string  `json:"total_size"`
-				FileCount  int     `json:"file_count"`
-				PIIPercent float64 `json:"pii_percent"`
-				PIIType    string  `json:"pii_type"`
+				TotalSize     string  `json:"total_size"`
+				FileCount     int     `json:"file_count"`
+				PIIPercent    float64 `json:"pii_percent"`
+				FillerPercent float64 `json:"filler_percent"`
+				PIIType       string  `json:"pii_type"`
 			} `json:"options"`
 		} `json:"profiles"`
 	}
@@ -879,16 +923,17 @@ func listProfiles(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tMODE\tSIZE/COUNT\tPII%\tTYPE")
+	fmt.Fprintln(w, "ID\tNAME\tDESCRIPTION\tPII%\tFILLER%\tTYPE")
 	for _, p := range result.Profiles {
-		mode := "count"
-		constraint := fmt.Sprintf("%d files", p.Options.FileCount)
-		if p.Options.TotalSize != "" {
-			mode = "size"
-			constraint = p.Options.TotalSize
+		desc := p.Description
+		if len(desc) > 40 {
+			desc = desc[:37] + "..."
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.0f%%\t%s\n",
-			p.ID[:8], p.Name, mode, constraint, p.Options.PIIPercent, p.Options.PIIType)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%.0f%%\t%.0f%%\t%s\n",
+			p.ID[:8], p.Name, desc,
+			p.Options.PIIPercent,
+			p.Options.FillerPercent,
+			p.Options.PIIType)
 	}
 	w.Flush()
 	return nil
@@ -903,8 +948,144 @@ func getProfile(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func showProfile(cmd *cobra.Command, args []string) error {
+	body, err := apiGet("/api/v1/profiles/" + args[0])
+	if err != nil {
+		return err
+	}
+	if outputJSON {
+		fmt.Println(string(body))
+		return nil
+	}
+	var p struct {
+		ID          string    `json:"id"`
+		Name        string    `json:"name"`
+		Description string    `json:"description"`
+		Options     struct {
+			OutputPath    string   `json:"output_path"`
+			TotalSize     string   `json:"total_size"`
+			FileCount     int      `json:"file_count"`
+			FileSizeMin   string   `json:"file_size_min"`
+			FileSizeMax   string   `json:"file_size_max"`
+			PIIPercent    float64  `json:"pii_percent"`
+			PIIType       string   `json:"pii_type"`
+			FillerPercent float64  `json:"filler_percent"`
+			Formats       []string `json:"formats"`
+			Seed          int64    `json:"seed"`
+		} `json:"options"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(body, &p); err != nil {
+		return err
+	}
+	fmt.Printf("Name:        %s\n", p.Name)
+	fmt.Printf("ID:          %s\n", p.ID)
+	if p.Description != "" {
+		fmt.Printf("Description: %s\n", p.Description)
+	}
+	fmt.Printf("Created:     %s\n", p.CreatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Printf("Updated:     %s\n", p.UpdatedAt.Format("2006-01-02 15:04:05"))
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Printf("  Output:    %s\n", p.Options.OutputPath)
+	if p.Options.TotalSize != "" {
+		fmt.Printf("  Mode:      size (%s)\n", p.Options.TotalSize)
+	} else {
+		fmt.Printf("  Mode:      count (%d files)\n", p.Options.FileCount)
+	}
+	fmt.Printf("  File Size: %s – %s\n", p.Options.FileSizeMin, p.Options.FileSizeMax)
+	fmt.Printf("  PII:       %.0f%% (%s)\n", p.Options.PIIPercent, p.Options.PIIType)
+	fmt.Printf("  Filler:    %.0f%%\n", p.Options.FillerPercent)
+	if len(p.Options.Formats) > 0 {
+		fmt.Printf("  Formats:   %s\n", strings.Join(p.Options.Formats, ", "))
+	}
+	if p.Options.Seed != 0 {
+		fmt.Printf("  Seed:      %d\n", p.Options.Seed)
+	}
+	return nil
+}
+
+func updateProfile(cmd *cobra.Command, args []string) error {
+	id := args[0]
+	updates := map[string]interface{}{}
+	options := map[string]interface{}{}
+
+	if cmd.Flags().Changed("name") {
+		v, _ := cmd.Flags().GetString("name")
+		updates["name"] = v
+	}
+	if cmd.Flags().Changed("description") {
+		v, _ := cmd.Flags().GetString("description")
+		updates["description"] = v
+	}
+	if cmd.Flags().Changed("file-count") {
+		v, _ := cmd.Flags().GetInt("file-count")
+		options["file_count"] = v
+	}
+	if cmd.Flags().Changed("total-size") {
+		v, _ := cmd.Flags().GetString("total-size")
+		options["total_size"] = v
+	}
+	if cmd.Flags().Changed("pii-percent") {
+		v, _ := cmd.Flags().GetFloat64("pii-percent")
+		options["pii_percent"] = v
+	}
+	if cmd.Flags().Changed("filler-percent") {
+		v, _ := cmd.Flags().GetFloat64("filler-percent")
+		options["filler_percent"] = v
+	}
+	if cmd.Flags().Changed("pii-type") {
+		v, _ := cmd.Flags().GetString("pii-type")
+		options["pii_type"] = v
+	}
+	if cmd.Flags().Changed("output") {
+		v, _ := cmd.Flags().GetString("output")
+		options["output_path"] = v
+	}
+	if cmd.Flags().Changed("file-size-min") {
+		v, _ := cmd.Flags().GetString("file-size-min")
+		options["file_size_min"] = v
+	}
+	if cmd.Flags().Changed("file-size-max") {
+		v, _ := cmd.Flags().GetString("file-size-max")
+		options["file_size_max"] = v
+	}
+	if len(options) > 0 {
+		updates["options"] = options
+	}
+	if len(updates) == 0 {
+		return fmt.Errorf("no changes specified — use flags to specify what to update")
+	}
+
+	body, err := apiPut("/api/v1/profiles/"+id, updates)
+	if err != nil {
+		return err
+	}
+	if outputJSON {
+		fmt.Println(string(body))
+		return nil
+	}
+	var p struct {
+		Name string `json:"name"`
+	}
+	json.Unmarshal(body, &p)
+	fmt.Printf("Updated profile: %s\n", p.Name)
+	return nil
+}
+
 func deleteProfile(cmd *cobra.Command, args []string) error {
-	req, err := http.NewRequest("DELETE", apiURL+"/api/v1/profiles/"+args[0], nil)
+	id := args[0]
+
+	fmt.Printf("Delete profile %q? This cannot be undone. [y/N]: ", id)
+	var response string
+	fmt.Scanln(&response)
+	if response != "y" && response != "Y" {
+		fmt.Println("Cancelled.")
+		return nil
+	}
+
+	req, err := http.NewRequest("DELETE", apiURL+"/api/v1/profiles/"+id, nil)
 	if err != nil {
 		return err
 	}
@@ -917,7 +1098,7 @@ func deleteProfile(cmd *cobra.Command, args []string) error {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("API error: %s", string(b))
 	}
-	fmt.Printf("Deleted profile: %s\n", args[0])
+	fmt.Printf("Deleted profile: %s\n", id)
 	return nil
 }
 
