@@ -790,7 +790,8 @@ func generateQuick(cmd *cobra.Command, args []string) error {
 	}
 
 	defer wsConn.Close()
-	fmt.Println("Streaming progress (Ctrl+C to detach)...\n")
+	fmt.Println("Streaming progress (Ctrl+C to detach)...")
+	fmt.Println()
 
 	for {
 		_, msg, err := wsConn.ReadMessage()
@@ -1153,7 +1154,8 @@ func generateFromProfile(cmd *cobra.Command, args []string) error {
 	}
 
 	defer wsConn.Close()
-	fmt.Println("Streaming progress (Ctrl+C to detach)...\n")
+	fmt.Println("Streaming progress (Ctrl+C to detach)...")
+	fmt.Println()
 
 	for {
 		_, msg, err := wsConn.ReadMessage()
