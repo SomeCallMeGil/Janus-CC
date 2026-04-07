@@ -285,6 +285,52 @@ Generation started — scenario ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 ---
 
+## encrypt
+
+Encrypt a percentage of files in a scenario. Runs in the background on the server; the command returns immediately after the job is accepted.
+
+Encrypted files are renamed with a `.janus` extension (e.g. `report.csv` → `report.csv.janus`). If a previous encryption attempt failed, those files are automatically retried.
+
+```
+janus-cli encrypt <scenario-id> [flags]
+```
+
+**Arguments**
+
+| Argument | Description |
+|----------|-------------|
+| `id` | Scenario UUID (from `scenario list`) |
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--password`, `-w` | (required) | Encryption password |
+| `--percentage`, `-p` | `25.0` | Percentage of files to encrypt (0–100) |
+| `--mode`, `-m` | `partial` | `partial` — encrypt first 4096 bytes only; `full` — encrypt entire file |
+
+**Examples**
+```bash
+# Encrypt 25% of files with partial mode
+janus-cli encrypt a1b2c3d4-e5f6-7890-abcd-ef1234567890 --password secret
+
+# Encrypt all files using full mode
+janus-cli encrypt a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  --password secret \
+  --percentage 100 \
+  --mode full
+```
+
+**Output**
+```
+✓ Encryption started for scenario: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  Percentage: 100.0%
+  Mode: full
+  (This runs in the background. Check server logs for progress)
+```
+
+---
+
 ## Other Commands
 
 ### health

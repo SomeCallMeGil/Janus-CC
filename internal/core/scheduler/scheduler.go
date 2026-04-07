@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/rs/zerolog/log"
 	"janus/internal/database/models"
 )
 
@@ -148,10 +149,21 @@ func (s *Scheduler) SelectFilesForJob(scenarioID string, targetPercentage float6
 
 	// Calculate target count
 	targetCount := int(float64(totalFiles) * targetPercentage / 100.0)
-	
+
 	// Subtract already encrypted
 	remainingToEncrypt := targetCount - encryptedCount
+
+	log.Debug().
+		Str("scenario_id", scenarioID).
+		Int("total_files", totalFiles).
+		Int("encrypted_count", encryptedCount).
+		Float64("target_pct", targetPercentage).
+		Int("target_count", targetCount).
+		Int("remaining_to_encrypt", remainingToEncrypt).
+		Msg("SelectFilesForJob counts")
+
 	if remainingToEncrypt <= 0 {
+		log.Warn().Str("scenario_id", scenarioID).Msg("SelectFilesForJob: target already met or no files to encrypt")
 		return []int64{}, nil // Already met target
 	}
 
@@ -163,20 +175,38 @@ func (s *Scheduler) SelectFilesForJob(scenarioID string, targetPercentage float6
 		return nil, fmt.Errorf("list pending files: %w", err)
 	}
 
+	// Include previously-failed files as retry candidates
+	failedFiles, err := s.db.ListFilesByScenario(scenarioID, models.FileFilters{
+		Status: models.FileStatusFailed,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list failed files: %w", err)
+	}
+
+	candidates := append(pendingFiles, failedFiles...)
+
+	log.Debug().
+		Str("scenario_id", scenarioID).
+		Int("pending", len(pendingFiles)).
+		Int("failed", len(failedFiles)).
+		Int("candidates", len(candidates)).
+		Int("remaining_to_encrypt", remainingToEncrypt).
+		Msg("SelectFilesForJob candidates")
+
 	// Select files based on method
 	var selectedIDs []int64
-	
+
 	switch method {
 	case "random":
-		selectedIDs = s.selectRandom(pendingFiles, remainingToEncrypt)
+		selectedIDs = s.selectRandom(candidates, remainingToEncrypt)
 	case "sequential":
-		selectedIDs = s.selectSequential(pendingFiles, remainingToEncrypt)
+		selectedIDs = s.selectSequential(candidates, remainingToEncrypt)
 	case "largest":
-		selectedIDs = s.selectLargest(pendingFiles, remainingToEncrypt)
+		selectedIDs = s.selectLargest(candidates, remainingToEncrypt)
 	case "smallest":
-		selectedIDs = s.selectSmallest(pendingFiles, remainingToEncrypt)
+		selectedIDs = s.selectSmallest(candidates, remainingToEncrypt)
 	default:
-		selectedIDs = s.selectRandom(pendingFiles, remainingToEncrypt)
+		selectedIDs = s.selectRandom(candidates, remainingToEncrypt)
 	}
 
 	return selectedIDs, nil

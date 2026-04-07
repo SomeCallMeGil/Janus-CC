@@ -127,10 +127,10 @@ func (e *Encryptor) EncryptFile(filePath string, opts *Options) error {
 	if err != nil {
 		return fmt.Errorf("open source: %w", err)
 	}
-	defer src.Close()
 	
 	info, err := src.Stat()
 	if err != nil {
+		src.Close()
 		return fmt.Errorf("stat file: %w", err)
 	}
 	
@@ -153,18 +153,20 @@ func (e *Encryptor) EncryptFile(filePath string, opts *Options) error {
 	}
 	tmpPath := tmpDst.Name()
 	defer os.Remove(tmpPath) // Clean up on error
-	
+
 	// Write header
 	header := e.createHeader(opts.Mode, bytesToEncrypt, salt, nonce)
 	if _, err := tmpDst.Write(header); err != nil {
+		src.Close()
 		tmpDst.Close()
 		return fmt.Errorf("write header: %w", err)
 	}
-	
+
 	// Read and encrypt data
 	plaintext := make([]byte, bytesToEncrypt)
 	n, err := io.ReadFull(src, plaintext)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		src.Close()
 		tmpDst.Close()
 		return fmt.Errorf("read data: %w", err)
 	}
@@ -175,6 +177,7 @@ func (e *Encryptor) EncryptFile(filePath string, opts *Options) error {
 	
 	// Write encrypted data
 	if _, err := tmpDst.Write(ciphertext); err != nil {
+		src.Close()
 		tmpDst.Close()
 		return fmt.Errorf("write ciphertext: %w", err)
 	}
@@ -182,18 +185,22 @@ func (e *Encryptor) EncryptFile(filePath string, opts *Options) error {
 	// For partial encryption, copy remaining bytes
 	if opts.Mode == ModePartialEncryption && bytesToEncrypt < info.Size() {
 		if _, err := io.Copy(tmpDst, src); err != nil {
+			src.Close()
 			tmpDst.Close()
 			return fmt.Errorf("copy remaining: %w", err)
 		}
 	}
-	
+
+	// Close source before rename — Windows won't allow overwriting an open file
+	src.Close()
+
 	// Sync to disk
 	if err := tmpDst.Sync(); err != nil {
 		tmpDst.Close()
 		return fmt.Errorf("sync: %w", err)
 	}
 	tmpDst.Close()
-	
+
 	// Atomic rename (overwrites original)
 	if err := os.Rename(tmpPath, filePath); err != nil {
 		return fmt.Errorf("rename: %w", err)
@@ -272,6 +279,8 @@ func (e *Encryptor) EncryptJob(jobID int64, opts *Options, progress ProgressCall
 		return fmt.Errorf("select files: %w", err)
 	}
 	
+	log.Info().Int64("job_id", jobID).Str("scenario_id", job.ScenarioID).Int("file_count", len(fileIDs)).Msg("EncryptJob selected files")
+
 	if len(fileIDs) == 0 {
 		// No files to encrypt, mark as completed
 		e.scheduler.UpdateJobStatus(jobID, models.JobStatusCompleted)
@@ -292,6 +301,7 @@ func (e *Encryptor) EncryptJob(jobID int64, opts *Options, progress ProgressCall
 			now := time.Now()
 			u.Status = models.FileStatusEncrypted
 			u.EncryptedAt = &now
+			u.Path = result.FilePath // updated path with .janus extension
 		}
 		updates = append(updates, u)
 	}
@@ -303,16 +313,19 @@ func (e *Encryptor) EncryptJob(jobID int64, opts *Options, progress ProgressCall
 	// Update job progress
 	e.scheduler.UpdateJobProgress(jobID, successCount)
 	
+	log.Info().Int64("job_id", jobID).Int("total", len(fileIDs)).Int("success", successCount).Int("failed", len(fileIDs)-successCount).Msg("EncryptJob complete")
+
 	// Update job status
-	if successCount == len(fileIDs) {
-		e.scheduler.UpdateJobStatus(jobID, models.JobStatusCompleted)
-	} else if successCount == 0 {
+	if successCount == 0 {
 		e.scheduler.UpdateJobStatus(jobID, models.JobStatusFailed)
+		return fmt.Errorf("encryption failed: all %d file(s) failed to encrypt", len(fileIDs))
+	} else if successCount == len(fileIDs) {
+		e.scheduler.UpdateJobStatus(jobID, models.JobStatusCompleted)
 	} else {
 		// Partial success still counts as completed
 		e.scheduler.UpdateJobStatus(jobID, models.JobStatusCompleted)
 	}
-	
+
 	return nil
 }
 
@@ -370,10 +383,24 @@ func (e *Encryptor) encryptSingleFile(fileID int64, opts *Options) EncryptResult
 	startTime := time.Now()
 	err = e.EncryptFile(file.Path, opts)
 	duration := time.Since(startTime)
-	
+
+	if err != nil {
+		log.Error().Err(err).Int64("file_id", fileID).Str("path", file.Path).Msg("encryptSingleFile failed")
+		return EncryptResult{FileID: fileID, FilePath: file.Path, Duration: duration, Error: err}
+	}
+
+	// Rename encrypted file to append .janus extension as a visual indicator
+	newPath := file.Path + ".janus"
+	if renameErr := os.Rename(file.Path, newPath); renameErr != nil {
+		log.Error().Err(renameErr).Str("path", file.Path).Msg("failed to rename encrypted file")
+		return EncryptResult{FileID: fileID, FilePath: file.Path, Duration: duration, Error: fmt.Errorf("rename to .janus: %w", renameErr)}
+	}
+
+	log.Debug().Int64("file_id", fileID).Str("path", newPath).Dur("duration", duration).Msg("encryptSingleFile ok")
+
 	return EncryptResult{
 		FileID:   fileID,
-		FilePath: file.Path,
+		FilePath: newPath,
 		Duration: duration,
 		Error:    err,
 	}

@@ -359,17 +359,31 @@ func (s *SQLiteDB) BatchUpdateFileStatus(updates []models.FileStatusUpdate) erro
 	}
 	defer tx.Rollback() // no-op after Commit
 
-	stmt, err := tx.Prepare(`
+	stmtNoPath, err := tx.Prepare(`
 		UPDATE files SET encryption_status = ?, encrypted_at = ? WHERE id = ?
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer stmtNoPath.Close()
+
+	stmtWithPath, err := tx.Prepare(`
+		UPDATE files SET encryption_status = ?, encrypted_at = ?, path = ? WHERE id = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare statement with path: %w", err)
+	}
+	defer stmtWithPath.Close()
 
 	for _, u := range updates {
-		if _, err := stmt.Exec(u.Status, u.EncryptedAt, u.FileID); err != nil {
-			return fmt.Errorf("update file %d: %w", u.FileID, err)
+		if u.Path != "" {
+			if _, err := stmtWithPath.Exec(u.Status, u.EncryptedAt, u.Path, u.FileID); err != nil {
+				return fmt.Errorf("update file %d: %w", u.FileID, err)
+			}
+		} else {
+			if _, err := stmtNoPath.Exec(u.Status, u.EncryptedAt, u.FileID); err != nil {
+				return fmt.Errorf("update file %d: %w", u.FileID, err)
+			}
 		}
 	}
 

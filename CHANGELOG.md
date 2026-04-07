@@ -7,6 +7,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.1.1] - 2026-04-07
+
+### Fixed
+- **Encryption error suppression** — `EncryptJob` always returned `nil` regardless of outcome. Jobs where every file failed now return a proper error and the `encryption_failed` WebSocket event fires correctly.
+- **Silent per-file failures** — the progress callback broadcast `file_encrypted` for every file regardless of result. Failed files now broadcast `file_failed` with the specific error message.
+- **Windows file lock on rename** — `defer src.Close()` left the source file open when `os.Rename` attempted to overwrite it. Windows holds an exclusive lock on open files; fixed by closing the source explicitly before the rename. All early-exit error paths also close the source.
+- **Encryption no-op after prior failure** — a previously failed run marked all files `failed` in the database. The scheduler only queried `pending` files, found zero candidates, and silently completed with no work done. Failed files are now included as retry candidates on subsequent runs.
+- **No visual indicator on encrypted files** — encrypted files were modified in place with no rename. Files are now renamed to append the `.janus` extension (e.g. `report.csv` → `report.csv.janus`) as a visual indicator. The new path is persisted to the database.
+
+---
+
 ## [3.1.0] - 2026-04-06
 
 ### Added

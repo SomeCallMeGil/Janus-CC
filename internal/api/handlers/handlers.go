@@ -328,6 +328,17 @@ func (h *Handlers) EncryptFiles(w http.ResponseWriter, r *http.Request) {
 		})
 
 		err := enc.EncryptScenario(id, req.Percentage, opts, func(result encryptor.EncryptResult) {
+			if result.Error != nil {
+				h.hub.Broadcast(map[string]interface{}{
+					"type":        "file_failed",
+					"scenario_id": id,
+					"file_id":     result.FileID,
+					"file_path":   result.FilePath,
+					"error":       result.Error.Error(),
+					"time":        time.Now().UTC(),
+				})
+				return
+			}
 			h.hub.Broadcast(map[string]interface{}{
 				"type":        "file_encrypted",
 				"scenario_id": id,

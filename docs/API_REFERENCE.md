@@ -250,6 +250,44 @@ Cancel an active or paused generation job.
 
 ---
 
+### POST /api/v1/scenarios/{id}/encrypt
+
+Encrypt a percentage of files in a scenario. Runs in the background; progress is streamed via WebSocket. Encrypted files are renamed with a `.janus` extension (e.g. `report.csv` → `report.csv.janus`).
+
+**Request body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `password` | string | yes | Encryption password |
+| `percentage` | float | no | Fraction of files to encrypt, 0–100 (default: 25) |
+| `mode` | string | no | `partial` (default) encrypts first 4096 bytes; `full` encrypts entire file |
+| `workers` | int | no | Parallel encryption workers (default: 4) |
+
+**Example**
+```bash
+curl -X POST http://localhost:8080/api/v1/scenarios/a1b2c3d4-.../encrypt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "password": "secret",
+    "percentage": 100,
+    "mode": "partial"
+  }'
+```
+
+**Response 202**
+```json
+{"message": "Encryption started"}
+```
+
+**Response 400** — missing or empty `password`.
+
+**Notes**
+- Files previously marked `failed` (e.g. from an interrupted run) are retried automatically.
+- Re-running encryption on a scenario that already met the target percentage is a no-op.
+- The file path in the database is updated to reflect the `.janus` rename.
+
+---
+
 ## WebSocket
 
 ### WS /ws
@@ -267,6 +305,11 @@ Connect to receive real-time generation events.
 | `generation_paused` | Job paused |
 | `generation_resumed` | Job resumed |
 | `generation_cancelled` | Job cancelled |
+| `encryption_started` | Encryption job started; includes `scenario_id` and `percentage` |
+| `file_encrypted` | Single file encrypted; includes `file_id` and `file_path` (`.janus` path) |
+| `file_failed` | Single file failed; includes `file_id`, `file_path`, and `error` message |
+| `encryption_completed` | All selected files processed successfully |
+| `encryption_failed` | Encryption job failed (all files errored); includes `error` message |
 
 **Example progress event**
 ```json

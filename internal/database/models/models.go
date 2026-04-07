@@ -103,6 +103,7 @@ type FileStatusUpdate struct {
 	FileID      int64
 	Status      FileStatus
 	EncryptedAt *time.Time // set when Status == FileStatusEncrypted
+	Path        string     // set when file is renamed (e.g. appending .janus)
 }
 
 // FileFilters for querying files
