@@ -16,11 +16,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	"janus/internal/api/jobs"
+	apijobs "janus/internal/api/jobs"
 	"janus/internal/api/websocket"
 	"janus/internal/core/encryptor"
 	"janus/internal/core/generator"
 	"janus/internal/core/generator/enhanced"
+	jobruns "janus/internal/core/jobs"
 	"janus/internal/core/profiles"
 	"janus/internal/core/scenario"
 	"janus/internal/core/scheduler"
@@ -38,16 +39,19 @@ type Handlers struct {
 	scheduler       *scheduler.Scheduler
 	tracker         *tracker.Tracker
 	profileManager  *profiles.Manager
-	jobRegistry     *jobs.Registry
+	jobRegistry     *apijobs.Registry
+	jobRunStore     *jobruns.SQLiteStore
 }
 
 // New creates new handlers
 func New(db models.Database, hub *websocket.Hub) *Handlers {
 	var profileMgr *profiles.Manager
+	var jobRunStore *jobruns.SQLiteStore
 	if sqlDB, ok := db.(*sqlite.SQLiteDB); ok {
 		store := profiles.NewSQLiteStore(sqlDB)
 		profileMgr = profiles.New(store)
 		seedDefaultProfiles(profileMgr)
+		jobRunStore = jobruns.NewSQLiteStore(sqlDB)
 	}
 
 	return &Handlers{
@@ -58,7 +62,8 @@ func New(db models.Database, hub *websocket.Hub) *Handlers {
 		scheduler:       scheduler.New(db),
 		tracker:         tracker.New(db),
 		profileManager:  profileMgr,
-		jobRegistry:     jobs.NewRegistry(),
+		jobRegistry:     apijobs.NewRegistry(),
+		jobRunStore:     jobRunStore,
 	}
 }
 
@@ -624,8 +629,22 @@ func (h *Handlers) runEnhancedGeneration(opts enhanced.QuickGenerateOptions, des
 	scenarioID := scenarioRecord.ID
 	opts.ScenarioID = scenarioID
 
-	ctrl := jobs.NewControl(context.Background())
+	ctrl := apijobs.NewControl(context.Background())
 	h.jobRegistry.Register(scenarioID, ctrl)
+
+	// Start job run tracking (best-effort — never blocks generation if store unavailable).
+	var jobRun *jobruns.JobRun
+	if h.jobRunStore != nil {
+		configJSON, _ := json.Marshal(opts)
+		jobRun, _ = jobruns.StartRun(h.jobRunStore, profileID, configJSON, opts.OutputPath)
+		if jobRun != nil {
+			// Create payload metadata directory alongside the output path.
+			baseDir := filepath.Dir(opts.OutputPath)
+			if payloadPath, err := jobruns.CreatePayloadDirectory(jobRun.ID, baseDir); err == nil {
+				jobruns.SavePayloadMetadata(payloadPath, jobRun, nil) //nolint:errcheck
+			}
+		}
+	}
 
 	go func() {
 		defer h.jobRegistry.Remove(scenarioID)
@@ -639,6 +658,9 @@ func (h *Handlers) runEnhancedGeneration(opts enhanced.QuickGenerateOptions, des
 		}
 		if profileID != "" {
 			startEvent["profile_id"] = profileID
+		}
+		if jobRun != nil {
+			startEvent["run_id"] = jobRun.ID
 		}
 		h.scenarioManager.UpdateStatus(scenarioID, "generating")
 		h.hub.Broadcast(startEvent)
@@ -665,6 +687,13 @@ func (h *Handlers) runEnhancedGeneration(opts enhanced.QuickGenerateOptions, des
 				status = "cancelled"
 			}
 			h.scenarioManager.UpdateStatus(scenarioID, status)
+			if jobRun != nil && h.jobRunStore != nil {
+				runStatus := jobruns.JobFailed
+				if err == context.Canceled {
+					runStatus = jobruns.JobCancelled
+				}
+				jobruns.FinishRun(h.jobRunStore, jobRun, runStatus, 0, err.Error()) //nolint:errcheck
+			}
 			h.hub.Broadcast(map[string]interface{}{
 				"type":        "enhanced_generation_failed",
 				"scenario_id": scenarioID,
@@ -676,6 +705,9 @@ func (h *Handlers) runEnhancedGeneration(opts enhanced.QuickGenerateOptions, des
 			return
 		}
 
+		if jobRun != nil && h.jobRunStore != nil {
+			jobruns.FinishRun(h.jobRunStore, jobRun, jobruns.JobCompleted, result.FilesCreated, "") //nolint:errcheck
+		}
 		h.scenarioManager.UpdateStatus(scenarioID, "ready")
 		h.hub.Broadcast(map[string]interface{}{
 			"type":          "enhanced_generation_completed",

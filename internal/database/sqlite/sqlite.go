@@ -172,9 +172,135 @@ func (s *SQLiteDB) Migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
+
+	CREATE TABLE IF NOT EXISTS job_runs (
+		id TEXT PRIMARY KEY,
+		profile_id TEXT NOT NULL DEFAULT '',
+		config_json TEXT NOT NULL DEFAULT '',
+		start_time DATETIME NOT NULL,
+		end_time DATETIME,
+		status TEXT NOT NULL,
+		output_path TEXT NOT NULL,
+		file_count INTEGER NOT NULL DEFAULT 0,
+		error_log TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_job_runs_profile ON job_runs(profile_id);
+	CREATE INDEX IF NOT EXISTS idx_job_runs_status ON job_runs(status);
+	CREATE INDEX IF NOT EXISTS idx_job_runs_start_time ON job_runs(start_time DESC);
 	`
 
 	_, err := s.db.Exec(schema)
+	return err
+}
+
+// JobRunRow is a job_runs record passed between the sqlite package and the jobs store.
+type JobRunRow struct {
+	ID         string
+	ProfileID  string
+	ConfigJSON string
+	StartTime  time.Time
+	EndTime    *time.Time
+	Status     string
+	OutputPath string
+	FileCount  int
+	ErrorLog   string
+	CreatedAt  time.Time
+}
+
+// CreateJobRun inserts a new job run record.
+func (s *SQLiteDB) CreateJobRun(row JobRunRow) error {
+	_, err := s.db.Exec(`
+		INSERT INTO job_runs (id, profile_id, config_json, start_time, end_time, status, output_path, file_count, error_log, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.ID, row.ProfileID, row.ConfigJSON, row.StartTime, row.EndTime,
+		row.Status, row.OutputPath, row.FileCount, row.ErrorLog, row.CreatedAt,
+	)
+	return err
+}
+
+// GetJobRun retrieves a job run by ID.
+func (s *SQLiteDB) GetJobRun(id string) (JobRunRow, error) {
+	var row JobRunRow
+	var endTime sql.NullTime
+	err := s.db.QueryRow(`
+		SELECT id, profile_id, config_json, start_time, end_time, status, output_path, file_count, error_log, created_at
+		FROM job_runs WHERE id = ?`, id,
+	).Scan(
+		&row.ID, &row.ProfileID, &row.ConfigJSON, &row.StartTime, &endTime,
+		&row.Status, &row.OutputPath, &row.FileCount, &row.ErrorLog, &row.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return row, fmt.Errorf("job run not found: %s", id)
+	}
+	if endTime.Valid {
+		row.EndTime = &endTime.Time
+	}
+	return row, err
+}
+
+// ListJobRuns returns job runs with optional filters.
+func (s *SQLiteDB) ListJobRuns(profileID, status string, limit, offset int) ([]JobRunRow, error) {
+	query := `SELECT id, profile_id, config_json, start_time, end_time, status, output_path, file_count, error_log, created_at FROM job_runs WHERE 1=1`
+	args := []interface{}{}
+
+	if profileID != "" {
+		query += " AND profile_id = ?"
+		args = append(args, profileID)
+	}
+	if status != "" {
+		query += " AND status = ?"
+		args = append(args, status)
+	}
+	query += " ORDER BY start_time DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []JobRunRow
+	for rows.Next() {
+		var row JobRunRow
+		var endTime sql.NullTime
+		if err := rows.Scan(
+			&row.ID, &row.ProfileID, &row.ConfigJSON, &row.StartTime, &endTime,
+			&row.Status, &row.OutputPath, &row.FileCount, &row.ErrorLog, &row.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		if endTime.Valid {
+			row.EndTime = &endTime.Time
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
+// UpdateJobRun updates a job run record.
+func (s *SQLiteDB) UpdateJobRun(row JobRunRow) error {
+	_, err := s.db.Exec(`
+		UPDATE job_runs SET profile_id=?, config_json=?, start_time=?, end_time=?, status=?, output_path=?, file_count=?, error_log=?
+		WHERE id=?`,
+		row.ProfileID, row.ConfigJSON, row.StartTime, row.EndTime,
+		row.Status, row.OutputPath, row.FileCount, row.ErrorLog, row.ID,
+	)
+	return err
+}
+
+// DeleteJobRun removes a job run by ID.
+func (s *SQLiteDB) DeleteJobRun(id string) error {
+	_, err := s.db.Exec(`DELETE FROM job_runs WHERE id = ?`, id)
 	return err
 }
 
